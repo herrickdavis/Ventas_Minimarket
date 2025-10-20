@@ -1,0 +1,150 @@
+/* Estilos Comunes para Tablas */
+.list-view-container {
+  padding: 20px;
+}
+
+.add-button {
+  background-color: #007bff;
+  color: white;
+  padding: 10px 15px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 20px;
+  font-size: 1rem;
+}
+
+.add-button:hover {
+  background-color: #0056b3;
+}
+
+.loading {
+  margin-top: 20px;
+  font-style: italic;
+  color: #6c757d;
+  text-align: center;
+  padding: 20px;
+}
+
+.error-message {
+  color: #dc3545;
+  margin-top: 10px;
+  font-size: 0.9rem;
+}
+
+.global-error {
+  border: 1px solid #e57373;
+  background-color: #ffebee;
+  padding: 10px 15px;
+  border-radius: 4px;
+  margin-bottom: 15px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+  background-color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  border-radius: 5px;
+  overflow: hidden;
+  /* Para bordes redondeados */
+}
+
+.data-table th, .data-table td {
+  border-bottom: 1px solid #dee2e6;
+  padding: 12px 15px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.data-table th {
+  background-color: #e9ecef;
+  /* Gris más claro */
+  font-weight: 600;
+  /* Semi-bold */
+  font-size: 0.9rem;
+  color: #495057;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.data-table tbody tr:hover {
+  background-color: #f1f3f5;
+}
+
+/* Hover suave */
+.data-table td.actions {
+  white-space: nowrap;
+  width: 1%;
+  text-align: center;
+}
+
+.actions button {
+  padding: 5px 8px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  margin: 0 3px;
+  font-size: 1rem;
+  background: none;
+  transition: color 0.2s ease;
+}
+
+.edit-button {
+  color: #ffc107;
+}
+
+.edit-button:hover {
+  color: #d39e00;
+}
+
+.delete-button {
+  color: #dc3545;
+}
+
+.delete-button:hover {
+  color: #a52834;
+}
+
+.view-button {
+  color: #17a2b8;
+}
+
+.view-button:hover {
+  color: #117a8b;
+}
+
+.pagination {
+  margin-top: 25px;
+  text-align: center;
+}
+
+.pagination button {
+  padding: 8px 12px;
+  margin: 0 5px;
+  background-color: #007bff;
+  color: white;
+  border: 1px solid #007bff;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.pagination button:hover:not(:disabled) {
+  background-color: #0056b3;
+  border-color: #0056b3;
+}
+
+.pagination button:disabled {
+  background-color: #e9ecef;
+  border-color: #dee2e6;
+  color: #6c757d;
+  cursor: not-allowed;
+}
+
+.pagination span {
+  margin: 0 10px;
+  vertical-align: middle;
+  color: #495057;
+}

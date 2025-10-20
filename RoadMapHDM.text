@@ -1,0 +1,2820 @@
+1. Resumen ejecutivo
+
+Sistema modular (Laravel/Vue o similar) con Ledger de inventario inmutable (movimientos_stock) como fuente de verdad, control de lotes y vencimientos, ventas por fracción (conversiones), POS capaz de ventas físicas (efectivo/Yape) y E-commerce con carrito → pedido por correo y aceptación manual por admin.
+
+2. Principios clave (visión experta)
+
+Inventario = Ledger: todo cambio se registra en movimientos_stock.
+
+Unidad base y conversiones: existe una unidad_base por producto y tablas de conversión.
+
+Trazabilidad por lote: numero_lote y fecha_vencimiento.
+
+Polimorfismo documental: documento_id y documento_tipo para enlazar origen.
+
+Permisos finos: roles + permisos (no solo roles).
+
+Operaciones atómicas: cada venta, recepción o ajuste es transaccional.
+
+Separación usuario vs cliente.
+
+3. Modelo de datos (tablas y campos en español)
+
+Para mayor claridad uso el formato: tabla — campos principales.
+
+3.1 Catálogo y productos
+
+productos
+
+id
+
+sku
+
+nombre
+
+descripcion
+
+tipo (enum: simple, variable, combo)
+
+marca_id
+
+categoria_id
+
+clase_impuesto_id
+
+unidad_base_id (FK a unidades) — p.ej. gramos
+
+es_vendible (bool)
+
+es_comprable (bool)
+
+es_producto_fisico (bool)
+
+umbral_bajo_stock (decimal)
+
+imagen_url
+
+creado_en, actualizado_en
+
+variantes_productos
+
+id, producto_id, sku, nombre, datos_atributo (JSON), precio_sobrescrito (nullable), unidad_base_id (nullable), timestamps
+
+combos_productos
+
+id, producto_combo_id, producto_item_id, variante_item_id (nullable), cantidad_item
+
+categorias, marcas, clases_impuestos (campos básicos)
+
+unidades
+
+id, codigo (kg,g,ud), nombre, decimales
+
+conversion_unidades
+
+id, unidad_origen_id, unidad_destino_id, factor (ej: 1 kg = 1000 g → factor 1000)
+
+3.2 Inventario (Ledger)
+
+ubicaciones
+
+id, nombre, es_vendible (bool), direccion, tipo (tienda, almacen, devolucion)
+
+movimientos_stock (ledger inmutable)
+
+id
+
+producto_id (nullable si variante_id presente)
+
+variante_id (nullable)
+
+ubicacion_id
+
+cantidad (decimal, + entrada, − salida)
+
+unidad_id (unidad de la cantidad)
+
+tipo_movimiento (enum: compra, venta, traslado_entrada, traslado_salida, ajuste, devolucion_entrada, devolucion_salida)
+
+numero_lote (nullable)
+
+fecha_vencimiento (nullable)
+
+documento_id, documento_tipo (polimórfico: Venta, Compra, Ajuste...)
+
+costo_unitario (decimal) — costo asociado al movimiento
+
+creado_por (usuario_id)
+
+creado_en
+
+ajustes_stock
+
+id, usuario_id, motivo, items_ajuste (JSON o tabla detalle), creado_en
+
+Notas: no se borra historial; los ajustes generan nuevos movimientos_stock.
+
+3.3 Compras y proveedores
+
+proveedores — id, nombre, contacto, ruc, condiciones_pago, creado_en
+
+ordenes_compra — id, proveedor_id, estado (borrador, enviado, parcialmente_recibido, recibido, cancelado), fecha_entrega_esperada, costo_total, numero_documento, creado_por, creado_en
+
+ordenes_compra_items — id, orden_compra_id, producto_id, variante_id, cantidad, unidad_id, costo_unitario, numero_lote (opcional), fecha_vencimiento (opcional)
+
+Al marcar recibida se crean movimientos_stock positivos con lote/fecha de vencimiento.
+
+3.4 Ventas, POS y E-commerce
+
+clientes — id, nombre, email, telefono, documento_identidad, lista_precios_id, usuario_id_opcional, creado_en
+
+sesiones_pos — id, usuario_id, ubicacion_id, saldo_apertura, saldo_cierre, iniciado_en, cerrado_en, estado
+
+ventas — id, cliente_id, usuario_id, sesion_pos_id (nullable), canal (pos, web), estado (borrador, pendiente_pago, completada, cancelada), subtotal, impuesto, descuento, total, estado_pago, numero_documento, creado_en
+
+venta_items — id, venta_id, producto_id, variante_id, cantidad, unidad_id, precio_unitario, descuento, subtotal, costo_en_venta (costo unitario), numero_lote_usado (nullable), creado_en
+
+Acción: Al completar la venta:
+
+seleccionar/lógica FEFO sobre movimientos_stock con lotes → crear movimientos_stock negativos por las cantidades consumidas, posiblemente fragmentando lotes.
+
+crear transaccion_caja (ledger financiero).
+
+carritos — id, cliente_id (nullable), items (detalle), creado_en, actualizado_en
+
+cart_items — id, carrito_id, producto_id, variante_id, cantidad, unidad_id, precio_aplicado, creado_en
+
+Flujo E-commerce específico pedido por correo:
+
+Al hacer checkout en web → se crea venta con canal = web y estado = pendiente_pago o pedido_recibido según diseño.
+
+Se envía un correo automático al admin/tienda con datos del pedido (o se notifica por API interna).
+
+El pago se coordina externamente (cliente paga por Yape/plin/transferencia fuera del sistema) y luego el admin marca pago recibido en el sistema y procesa envío. (Esto está contemplado en estado y en transaccion_caja luego.)
+
+3.5 Precios y promociones
+
+listas_precios — id, nombre, descripcion, activo
+
+reglas_lista_precios — id, lista_precio_id, producto_id (o variante_id), unidad_id, precio, cantidad_minima, fecha_inicio, fecha_fin
+
+promociones / descuentos — soportar tipo porcentaje, monto fijo, 2x1, escalas por cantidad.
+
+3.6 Finanzas y caja
+
+metodos_pago — id, nombre (Efectivo, Tarjeta, Yape, Plin), comision, activo
+
+transacciones_caja (ledger financiero) — id, monto (+/-), tipo (venta, compra, gasto, apertura_caja), metodo_pago_id, documento_tipo, documento_id, descripcion, creado_por, creado_en
+
+gastos — id, categoria, monto, fecha, descripcion, pagado_por, creado_por, creado_en
+
+Nota: ventas POS registran transacciones_caja al confirmar pago.
+
+3.7 Seguridad y auditoría
+
+usuarios — id, nombre, email, clave_hash, ultimo_login, activo
+
+roles, permisos, rol_permiso, usuario_rol — permisos atómicos (ver_reportes, crear_venta, recibir_compra, ajustar_stock, emitir_factura)
+
+registro_actividad — id, usuario_id, accion, modelo_tipo, modelo_id, datos_anteriores, datos_nuevos, ip, user_agent, creado_en
+
+4. Lógicas de negocio críticas (resumidas y en español)
+4.1 Cálculo stock actual
+
+Stock actual = SUM(cantidad_normalizada) desde movimientos_stock filtrando por producto/variante/ubicacion. La normalización usa conversion_unidades hacia unidad_base.
+
+4.2 Venta por fracción (ej. saco 50 kg → vender por kg)
+
+Recepción: saco 50 kg → movimiento_stock +50 kg convertido a unidad_base (p.ej. 50*1000 g).
+
+Venta 0.5 kg: sistema consulta movimientos FEFO y consume 500 g del lote correspondiente, creando movimiento_stock negativo vinculado a la venta.
+
+4.3 Combos
+
+Venta de combo genera movimiento_stock negativos para cada producto_item con su cantidad_item.
+
+4.4 Recepción y lotes
+
+Al recibir PO, se crean movimientos_stock positivos con numero_lote y fecha_vencimiento. PO pasa a parcialmente_recibido o recibido.
+
+4.5 Ajustes (merma, robo, vencimiento)
+
+Crear ajuste_stock que genera movimiento_stock negativo; registrar registro_actividad. Requiere permiso ajustar_stock.
+
+4.6 Reglas de precio / aplicación en ventas
+
+Flujo: determinar lista de precio del cliente → aplicar regla producto/variante → aplicar promoción/descuento → fijar precio_aplicado en venta_item para auditoría.
+
+4.7 Cierre de caja
+
+Al cerrar sesion_pos, reconciliar transacciones_caja asociadas y generar reporte de diferencias. Si desajuste > umbral → alerta.
+
+4.8 Pedidos web → flujo de pago externo
+
+Checkout crea venta/pedido con estado = pedido_recibido y envía correo al admin.
+
+Admin verifica y coordina pago externo (Yape/plin/transferencia).
+
+Admin marca venta.estado = pagado y registra transaccion_caja o registro_pago cuando recibe el pago externo.
+
+5. Endpoints y UIs (mapa funcional en español)
+Panel administrador (roles: Admin, Gerente, Almacenero, Cajero)
+
+Dashboard: ventas del día, stock bajo, vencimientos.
+
+Productos: CRUD, variantes, combos, importación CSV/XLSX.
+
+Inventario: Kardex, movimientos por lote, ajustes.
+
+Compras: CRUD de órdenes de compra y recepción.
+
+POS: interfaz de venta (búsqueda SKU/barcode, lector), apertura/cierre de caja.
+
+Precios: listas y reglas.
+
+Pedidos web: lista de pedidos recibidos (carrito → pedido), aceptarlos y procesar pagos manuales.
+
+Clientes/Proveedores: CRUD.
+
+Reportes: stock, kardex, vencimientos, ventas, P&L.
+
+Usuarios: gestión roles/permisos, activity log.
+
+E-commerce (cliente)
+
+Landing, catálogo, filtro, detalle producto (stock por tienda opcional).
+
+Carrito → Checkout (crea pedido en sistema, envía email al admin).
+
+Historial de pedidos (mis pedidos) y estado (pendiente, pagado, enviado).
+
+APIs internas (ejemplos)
+
+POST /api/pos/venta → crear venta POS, generar movimientos y transacción caja.
+
+POST /api/compras/recibir → marcar recepción y crear movimientos.
+
+GET /api/inventario/kardex?producto_id=&ubicacion_id=
+
+POST /api/stock/ajuste → crear ajuste.
+
+6. Flujos de trabajo (casos concretos)
+6.1 Alta y venta por fracción
+
+Crear producto con unidad_base = g.
+
+Crear variante "Saco 50 kg".
+
+Recibir PO de 1 saco → movimiento_stock +50 kg = +50,000 g (numero_lote = L001).
+
+Venta 1.2 kg → consumir 1,200 g del lote L001 (FEFO) → movimiento_stock -1,200 g; venta_item guarda precio_unitario por kg y numero_lote_usado.
+
+6.2 Carrito → pedido → pago externo
+
+Cliente crea carrito y hace checkout → se crea venta con canal = web y estado = pedido_recibido.
+
+Correo automático al admin con detalle del pedido.
+
+Admin revisa, confirma stock, coordina pago externo (Yape/transferencia).
+
+Admin marca pago recibido en sistema → crear transaccion_caja y actualizar venta.estado = pagado → preparar envío.
+
+6.3 Venta en tienda (POS) con Yape o efectivo
+
+Abrir sesion_pos.
+
+Buscar producto, seleccionar cantidad/unidad (kg, ud), agregar al carrito POS.
+
+Cobrar: seleccionar metodo_pago (Efectivo, Yape).
+
+Confirmar venta → generar movimiento_stock negativo, transaccion_caja positiva, registrar venta.estado = completada.
+
+7. Reportes esenciales (cómo obtenerlos)
+
+Stock actual: SUM de movimientos_stock normalizados por unidad_base.
+
+Kardex: listados de movimientos_stock por producto/lote/rango fecha.
+
+Vencimientos: movimientos_stock con fecha_vencimiento próxima.
+
+Ventas por periodo: SUM de ventas.total por rango.
+
+COGS: SUM(venta_items.cantidad * costo_en_venta).
+
+P&L: Ventas − COGS − Gasto.
+
+Cuadre caja: transacciones_caja por sesion_pos.
+
+8. Requisitos no funcionales (NFR en español)
+
+Escalabilidad: separar API, workers; usar colas (Redis/Rabbit) para tareas (envío correo, facturación).
+
+Consistencia: transacciones ACID en operaciones críticas.
+
+POS offline: cache de catálogo y cola de ventas a sincronizar (opcional, si se requiere).
+
+Seguridad: TLS, contraseñas bcrypt/argon2, 2FA para admins, permisos finos.
+
+Backups y DR: snapshots diarios, pruebas de restauración.
+
+Observabilidad: logs estructurados, métricas y alertas.
+
+Retención de datos: definir política para logs/actividad.
+
+9. Integraciones externas (a contemplar)
+
+Facturación electrónica con SUNAT (cuando se implemente).
+
+Gateways de pago (Yape/Plin/Tarjeta) — al principio pago externo manual.
+
+Hardware POS: impresora de tickets, lector de códigos de barra.
+
+Servicios de envío (si aplica).
+
+10. Fases y cronograma (resumen en español)
+
+Fase 0 — Cimientos (1 semana): migraciones iniciales (usuarios, roles, permisos, unidades, categorias), login y layout admin. CA: login y roles/perm funcionan.
+
+Fase 1 — Catálogo & Ledger (3 semanas): productos, variantes, combos, movimientos_stock, ubicaciones. CA: crear producto, recibir compra, ver stock.
+
+Fase 2 — Compras y lotes (2 semanas): proveedores, ordenes_compra, recepción con lotes. CA: PO → recibir → lotes en inventario.
+
+Fase 3 — Precios & Clientes (2 semanas): listas_precios, reglas, clientes. CA: price_list aplicado en venta.
+
+Fase 4 — POS (3 semanas): sesiones_pos, ventas, venta_items, transacciones_caja. CA: apertura/cierre caja, venta POS consume stock.
+
+Fase 5 — E-commerce (3 semanas): API pública, catálogo, carrito, checkout → pedido (correo). CA: pedido web crea venta y notifica admin; stock se reserva/opcional.
+
+Fase 6 — Reportes & Auditoría (2 semanas): registro_actividad, dashboard, reportes clave. CA: kardex y reportes OK.
+
+Fase 7 — Facturación SUNAT y despliegue (1–2 semanas): integrar PSE. CA: emitir comprobante y respuesta SUNAT.
+
+Total estimado: ~14–16 semanas (dependiendo recursos).
+
+11. Pruebas clave (checklist QA)
+
+Venta parcial de lote y validación de stock.
+
+Recepción parcial de PO y venta posterior.
+
+Ajuste por merma y reversión.
+
+Venta de combo y decremento correcto de ítems.
+
+Transferencia entre ubicaciones.
+
+Cierre de caja y detección de diferencias.
+
+Flujo carrito → pedido → pago externo marcado por admin.
+
+Permisos: bloqueo de acciones sin permiso.
+
+12. Seguridad operativa y gobernanza (en español)
+
+Roles mínimos sugeridos: Administrador, Gerente, Almacenero, Cajero, Contador.
+
+Revisiones semanales de registro_actividad.
+
+2FA para administradores.
+
+Backup y prueba de restauración trimestral.
+
+13. Checklist de despliegue (producción)
+
+HTTPS, dominios, certificados.
+
+Colas y workers configurados.
+
+Monitoreo (logs, métricas), alertas.
+
+Backups automáticos y plan RTO/RPO.
+
+Pruebas de carga en endpoints críticos (POS/catálogo).
+
+Revisión de seguridad OWASP.
+
+14. Documentación y capacitación (entregables)
+
+ERD y migraciones en español.
+
+Especificación API (OpenAPI) en español.
+
+Manual operativo (recepción, venta, merma, apertura/cierre caja).
+
+Entrenamiento para cajeros/almaceneros.
+
+15. Entregables por hito (qué recibirás)
+
+Migraciones y ERD (nombres en español).
+
+API spec en español.
+
+Panel admin básico (productos, ledger).
+
+POS básico y flujo web-carrito → pedido.
+
+Reportes esenciales y dashboard.
+
+Script/estructura para integrar facturación (PSE) posteriormente.
+
+16. Decisiones arquitectónicas críticas (propuestas por defecto)
+
+Te propongo valores por defecto razonables; si quieres los cambiamos:
+
+Unidad base por producto: configurable por producto; por defecto usar unidad_base (sí, por producto).
+
+POS offline: implementar cola ligera (ventas se registran localmente y se sincronizan cuando hay conexión) — recomendado. Si quieres offline total, requerirá más trabajo.
+
+Consistencia multi-tienda: eventual consistency entre tiendas con sincronización central; lecturas críticas (stock sellable) pueden usar locks/optimistic concurrency.
+
+Proveedor PSE/SUNAT: usar PSE genérico (integración con proveedor homologado) — confirmamos proveedor concreto más adelante.
+
+Retención logs: sugerido 1 año para activity_log y 5 años para comprobantes fiscales (ajustable por normativa).
+
+Notas operativas específicas que pediste (resumen):
+
+Carrito → pedido por correo: implementado. Checkout crea pedido en sistema y envía email a admin; admin acepta y coordina cobro externo (Yape/transferencia). Luego admin marca pago en sistema y envía pedido.
+
+Venta física: en POS se permite pago en efectivo y Yape (registrar transacción y reducir stock).
+
+Conversión de unidades: cada producto tiene unidad_base y la UI permite elegir vender por kg, unidad, fracción; conversiones usan conversion_unidades.
+
+Venta de sacos por kg / fracciones: contemplado (fragmentación de lotes en movimientos).
+
+Ingresos de dinero y cuadre de caja: transacciones_caja + sesiones_pos para apertura/cierre y cuadre.
+
+Todo lo demás (ajustes, lotes, vencimientos, permisos, auditoría): contemplado y detallado arriba.
+
+se creoe sto:
+Crea las carpetas y archivos .vue que faltan: (Estos comandos crean las carpetas y archivos vacíos necesarios)
+
+PowerShell
+
+# Crear carpetas para las vistas de admin
+mkdir src/views/admin/products
+mkdir src/views/admin/categories
+mkdir src/views/admin/units
+mkdir src/views/admin/prices
+
+# Crear los archivos .vue vacíos (puedes usar 'echo "" > archivo' o crearlos manualmente)
+New-Item src/views/admin/products/ProductListView.vue -ItemType File
+New-Item src/views/admin/categories/CategoryListView.vue -ItemType File
+New-Item src/views/admin/units/UnitListView.vue -ItemType File
+New-Item src/views/admin/prices/PriceListView.vue -ItemType File
+
+# (Opcional) Si quieres añadir contenido básico a cada archivo nuevo:
+# Set-Content src/views/admin/products/ProductListView.vue '<template><div>Lista Productos</div></template>'
+# Set-Content src/views/admin/categories/CategoryListView.vue '<template><div>Lista Categorías</div></template>'
+# Set-Content src/views/admin/units/UnitListView.vue '<template><div>Lista Unidades</div></template>'
+# Set-Content src/views/admin/prices/PriceListView.vue '<template><div>Lista Precios</div></template>'
+
+tenemso este backend:
+
+1. App catalogo (Productos, Unidades y Precios)
+Esta app maneja qué vendes y cuánto cuesta.
+
+Archivo: catalogo/models.py (COMPLETO)
+Python
+
+from django.db import models
+from django.utils.translation import gettext_lazy as _
+
+# --- Modelos Base (Punto 3.1 del Plan) ---
+
+class Categoria(models.Model):
+    nombre = models.CharField(max_length=100, unique=True)
+    padre = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='subcategorias')
+
+    class Meta:
+        verbose_name = "Categoría"
+        verbose_name_plural = "Categorías"
+
+    def __str__(self):
+        return self.nombre
+
+class Marca(models.Model):
+    nombre = models.CharField(max_length=100, unique=True)
+
+    def __str__(self):
+        return self.nombre
+
+class ClaseImpuesto(models.Model):
+    nombre = models.CharField(max_length=100, unique=True) # Ej: "IGV 18%", "Exonerado"
+    porcentaje = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+
+    class Meta:
+        verbose_name = "Clase de Impuesto"
+        verbose_name_plural = "Clases de Impuestos"
+
+    def __str__(self):
+        return f"{self.nombre} ({self.porcentaje}%)"
+
+class Unidad(models.Model):
+    codigo = models.CharField(max_length=10, unique=True) # Ej: "kg", "g", "ud", "lt", "ml"
+    nombre = models.CharField(max_length=50)
+    decimales = models.PositiveSmallIntegerField(default=0) 
+
+    class Meta:
+        verbose_name = "Unidad de Medida"
+        verbose_name_plural = "Unidades de Medida"
+
+    def __str__(self):
+        return f"{self.nombre} ({self.codigo})"
+
+class ConversionUnidad(models.Model):
+    unidad_origen = models.ForeignKey(Unidad, on_delete=models.CASCADE, related_name='conversiones_origen')
+    unidad_destino = models.ForeignKey(Unidad, on_delete=models.CASCADE, related_name='conversiones_destino')
+    factor = models.DecimalField(max_digits=14, decimal_places=6)
+
+    class Meta:
+        verbose_name = "Conversión de Unidad"
+        verbose_name_plural = "Conversiones de Unidades"
+
+    def __str__(self):
+        return f"1 {self.unidad_origen.codigo} = {self.factor} {self.unidad_destino.codigo}"
+
+# --- Modelos Principales de Producto (Punto 3.1) ---
+
+class Producto(models.Model):
+    
+    class TipoProducto(models.TextChoices):
+        SIMPLE = 'simple', _('Simple')
+        VARIABLE = 'variable', _('Variable')
+        COMBO = 'combo', _('Combo')
+
+    sku = models.CharField(max_length=100, unique=True, null=True, blank=True)
+    nombre = models.CharField(max_length=255)
+    descripcion = models.TextField(null=True, blank=True)
+    tipo = models.CharField(max_length=10, choices=TipoProducto.choices, default=TipoProducto.SIMPLE)
+
+    marca = models.ForeignKey(Marca, on_delete=models.SET_NULL, null=True, blank=True)
+    categoria = models.ForeignKey(Categoria, on_delete=models.SET_NULL, null=True, blank=True)
+    clase_impuesto = models.ForeignKey(ClaseImpuesto, on_delete=models.SET_NULL, null=True, blank=True)
+    unidad_base = models.ForeignKey(Unidad, on_delete=models.PROTECT, related_name='productos')
+
+    es_vendible = models.BooleanField(default=True)
+    es_comprable = models.BooleanField(default=True)
+    es_producto_fisico = models.BooleanField(default=True)
+    
+    umbral_bajo_stock = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
+    imagen_url = models.CharField(max_length=500, null=True, blank=True)
+
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Producto"
+        verbose_name_plural = "Productos"
+
+    def __str__(self):
+        return f"{self.nombre} ({self.sku or ''})"
+
+class VarianteProducto(models.Model):
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name='variantes')
+    sku = models.CharField(max_length=100, unique=True, null=True, blank=True)
+    nombre = models.CharField(max_length=100)
+    datos_atributo = models.JSONField(null=True, blank=True)
+    precio_sobrescrito = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    unidad_base = models.ForeignKey(Unidad, on_delete=models.PROTECT, null=True, blank=True)
+    
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Variante de Producto"
+        verbose_name_plural = "Variantes de Productos"
+
+    def __str__(self):
+        return f"{self.producto.nombre} - {self.nombre}"
+
+class ComboProducto(models.Model):
+    producto_combo = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name='items_combo')
+    producto_item = models.ForeignKey(Producto, on_delete=models.PROTECT, related_name='en_combos')
+    variante_item = models.ForeignKey(VarianteProducto, on_delete=models.PROTECT, null=True, blank=True)
+    cantidad_item = models.DecimalField(max_digits=10, decimal_places=3)
+
+    class Meta:
+        verbose_name = "Item de Combo"
+        verbose_name_plural = "Items de Combos"
+
+    def __str__(self):
+        return f"Combo '{self.producto_combo.nombre}' contiene {self.cantidad_item} de '{self.producto_item.nombre}'"
+
+# --- FASE 3.5: Precios (Aquí pertenecen) ---
+
+class ListaPrecios(models.Model):
+    nombre = models.CharField(max_length=100, unique=True) # Ej: "Minorista", "Mayorista"
+    descripcion = models.TextField(null=True, blank=True)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Lista de Precio"
+        verbose_name_plural = "Listas de Precios"
+
+    def __str__(self):
+        return self.nombre
+
+class ReglaListaPrecios(models.Model):
+    lista_precio = models.ForeignKey(ListaPrecios, on_delete=models.CASCADE, related_name='reglas')
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE, null=True, blank=True)
+    variante = models.ForeignKey(VarianteProducto, on_delete=models.CASCADE, null=True, blank=True)
+    unidad = models.ForeignKey(Unidad, on_delete=models.CASCADE)
+    precio = models.DecimalField(max_digits=10, decimal_places=2)
+    cantidad_minima = models.DecimalField(max_digits=10, decimal_places=3, default=1)
+    fecha_inicio = models.DateField(null=True, blank=True)
+    fecha_fin = models.DateField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Regla de Lista de Precio"
+        verbose_name_plural = "Reglas de Listas de Precios"
+
+    def __str__(self):
+        return f"Regla para {self.lista_precio.nombre} - Precio: {self.precio}"
+Archivo: catalogo/admin.py (COMPLETO)
+Python
+
+from django.contrib import admin
+from .models import (
+    Categoria, Marca, ClaseImpuesto, Unidad, 
+    ConversionUnidad, Producto, VarianteProducto, ComboProducto,
+    ListaPrecios, ReglaListaPrecios
+)
+
+class ReglaListaPreciosInline(admin.TabularInline):
+    model = ReglaListaPrecios
+    extra = 1
+
+@admin.register(ListaPrecios)
+class ListaPreciosAdmin(admin.ModelAdmin):
+    list_display = ('nombre', 'activo')
+    inlines = [ReglaListaPreciosInline]
+
+class VarianteProductoInline(admin.TabularInline):
+    model = VarianteProducto
+    extra = 1
+
+@admin.register(Producto)
+class ProductoAdmin(admin.ModelAdmin):
+    list_display = ('nombre', 'sku', 'tipo', 'categoria', 'marca', 'unidad_base', 'es_vendible')
+    list_filter = ('tipo', 'categoria', 'marca', 'es_vendible')
+    search_fields = ('nombre', 'sku')
+    inlines = [VarianteProductoInline]
+
+# Registros base
+admin.site.register(Categoria)
+admin.site.register(Marca)
+admin.site.register(ClaseImpuesto)
+admin.site.register(Unidad)
+admin.site.register(ConversionUnidad)
+admin.site.register(VarianteProducto)
+admin.site.register(ComboProducto)
+Archivo: catalogo/serializers.py (COMPLETO)
+Python
+
+from rest_framework import serializers
+from .models import (
+    Categoria, Marca, ClaseImpuesto, Unidad, ConversionUnidad, 
+    Producto, VarianteProducto, ComboProducto, ListaPrecios, ReglaListaPrecios
+)
+
+class CategoriaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Categoria
+        fields = '__all__'
+
+class MarcaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Marca
+        fields = '__all__'
+
+class ClaseImpuestoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClaseImpuesto
+        fields = '__all__'
+
+class UnidadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Unidad
+        fields = '__all__'
+
+class ConversionUnidadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConversionUnidad
+        fields = '__all__'
+
+class VarianteProductoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VarianteProducto
+        fields = '__all__'
+
+class ComboProductoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ComboProducto
+        fields = '__all__'
+
+class ProductoSerializer(serializers.ModelSerializer):
+    variantes = VarianteProductoSerializer(many=True, read_only=True)
+    items_combo = ComboProductoSerializer(many=True, read_only=True)
+    
+    categoria = serializers.StringRelatedField()
+    marca = serializers.StringRelatedField()
+    unidad_base = serializers.StringRelatedField()
+
+    class Meta:
+        model = Producto
+        fields = [
+            'id', 'sku', 'nombre', 'descripcion', 'tipo', 'marca', 'categoria', 
+            'clase_impuesto', 'unidad_base', 'es_vendible', 'es_comprable', 
+            'es_producto_fisico', 'umbral_bajo_stock', 'imagen_url', 
+            'creado_en', 'actualizado_en', 'variantes', 'items_combo'
+        ]
+
+class ListaPreciosSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ListaPrecios
+        fields = '__all__'
+
+class ReglaListaPreciosSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReglaListaPrecios
+        fields = '__all__'
+Archivo: catalogo/views.py (COMPLETO)
+Python
+
+from rest_framework import viewsets, permissions
+from .models import (
+    Categoria, Marca, ClaseImpuesto, Unidad, ConversionUnidad, 
+    Producto, VarianteProducto, ComboProducto, ListaPrecios, ReglaListaPrecios
+)
+from .serializers import (
+    CategoriaSerializer, MarcaSerializer, ClaseImpuestoSerializer, UnidadSerializer, 
+    ConversionUnidadSerializer, ProductoSerializer, VarianteProductoSerializer, 
+    ComboProductoSerializer, ListaPreciosSerializer, ReglaListaPreciosSerializer
+)
+
+class CategoriaViewSet(viewsets.ModelViewSet):
+    queryset = Categoria.objects.all()
+    serializer_class = CategoriaSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class MarcaViewSet(viewsets.ModelViewSet):
+    queryset = Marca.objects.all()
+    serializer_class = MarcaSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ClaseImpuestoViewSet(viewsets.ModelViewSet):
+    queryset = ClaseImpuesto.objects.all()
+    serializer_class = ClaseImpuestoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class UnidadViewSet(viewsets.ModelViewSet):
+    queryset = Unidad.objects.all()
+    serializer_class = UnidadSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ConversionUnidadViewSet(viewsets.ModelViewSet):
+    queryset = ConversionUnidad.objects.all()
+    serializer_class = ConversionUnidadSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ProductoViewSet(viewsets.ModelViewSet):
+    queryset = Producto.objects.prefetch_related('variantes', 'items_combo').all()
+    serializer_class = ProductoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+class VarianteProductoViewSet(viewsets.ModelViewSet):
+    queryset = VarianteProducto.objects.all()
+    serializer_class = VarianteProductoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ComboProductoViewSet(viewsets.ModelViewSet):
+    queryset = ComboProducto.objects.all()
+    serializer_class = ComboProductoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ListaPreciosViewSet(viewsets.ModelViewSet):
+    queryset = ListaPrecios.objects.all()
+    serializer_class = ListaPreciosSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ReglaListaPreciosViewSet(viewsets.ModelViewSet):
+    queryset = ReglaListaPrecios.objects.all()
+    serializer_class = ReglaListaPreciosSerializer
+    permission_classes = [permissions.IsAuthenticated]
+Archivo: catalogo/urls.py (COMPLETO)
+Python
+
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import (
+    CategoriaViewSet, MarcaViewSet, ClaseImpuestoViewSet, UnidadViewSet, 
+    ConversionUnidadViewSet, ProductoViewSet, VarianteProductoViewSet, 
+    ComboProductoViewSet, ListaPreciosViewSet, ReglaListaPreciosViewSet
+)
+
+router = DefaultRouter()
+router.register(r'categorias', CategoriaViewSet, basename='categoria')
+router.register(r'marcas', MarcaViewSet, basename='marca')
+router.register(r'clases-impuestos', ClaseImpuestoViewSet, basename='claseimpuesto')
+router.register(r'unidades', UnidadViewSet, basename='unidad')
+router.register(r'conversiones-unidades', ConversionUnidadViewSet, basename='conversionunidad')
+router.register(r'productos', ProductoViewSet, basename='producto')
+router.register(r'variantes', VarianteProductoViewSet, basename='variante')
+router.register(r'combos', ComboProductoViewSet, basename='combo')
+router.register(r'listas-precios', ListaPreciosViewSet, basename='listaprecios')
+router.register(r'reglas-precios', ReglaListaPreciosViewSet, basename='reglaprecios')
+
+urlpatterns = [
+    path('', include(router.urls)),
+]
+2. App inventario (El Ledger)
+Esta app se mantiene igual que en las respuestas anteriores.
+
+Archivo: inventario/models.py (COMPLETO)
+Python
+
+from django.db import models
+from django.contrib.auth.models import User
+from django.utils.translation import gettext_lazy as _
+
+# Importamos los modelos del catálogo que acabamos de crear
+from catalogo.models import Producto, VarianteProducto, Unidad
+
+# Para el Polimorfismo (Punto 2 del Plan)
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+
+# --- Modelos de Inventario (Punto 3.2 del Plan) ---
+
+class Ubicacion(models.Model):
+    nombre = models.CharField(max_length=100, unique=True) # Ej: "Almacén Principal", "Piso de Venta", "Mermas"
+    es_vendible = models.BooleanField(default=False) # Solo el stock en "Piso de Venta" es vendible
+    
+    class TipoUbicacion(models.TextChoices):
+        TIENDA = 'tienda', _('Tienda')
+        ALMACEN = 'almacen', _('Almacén')
+        DEVOLUCION = 'devolucion', _('Devoluciones')
+        VIRTUAL = 'virtual', _('Virtual') # Para ajustes
+
+    tipo = models.CharField(max_length=20, choices=TipoUbicacion.choices, default=TipoUbicacion.ALMACEN)
+    
+    class Meta:
+        verbose_name = "Ubicación"
+        verbose_name_plural = "Ubicaciones"
+
+    def __str__(self):
+        return self.nombre
+
+class MovimientoStock(models.Model):
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, null=True, blank=True)
+    variante = models.ForeignKey(VarianteProducto, on_delete=models.PROTECT, null=True, blank=True)
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT)
+    
+    cantidad = models.DecimalField(max_digits=12, decimal_places=4) 
+    unidad = models.ForeignKey(Unidad, on_delete=models.PROTECT)
+
+    class TipoMovimiento(models.TextChoices):
+        COMPRA = 'compra', _('Compra')
+        VENTA = 'venta', _('Venta')
+        TRASLADO_ENTRADA = 'traslado_entrada', _('Traslado (Entrada)')
+        TRASLADO_SALIDA = 'traslado_salida', _('Traslado (Salida)')
+        AJUSTE = 'ajuste', _('Ajuste')
+        DEVOLUCION_ENTRADA = 'devolucion_entrada', _('Devolución (Entrada)')
+        DEVOLUCION_SALIDA = 'devolucion_salida', _('Devolución (Salida)')
+
+    tipo_movimiento = models.CharField(max_length=20, choices=TipoMovimiento.choices)
+    
+    numero_lote = models.CharField(max_length=100, null=True, blank=True)
+    fecha_vencimiento = models.DateField(null=True, blank=True)
+    costo_unitario = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    documento = GenericForeignKey('content_type', 'object_id')
+    
+    creado_por = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Movimiento de Stock"
+        verbose_name_plural = "Movimientos de Stock (Ledger)"
+        ordering = ['-creado_en'] 
+
+    def __str__(self):
+        signo = "+" if self.cantidad > 0 else ""
+        return f"[{self.creado_en.strftime('%Y-%m-%d')}] {self.tipo_movimiento}: {signo}{self.cantidad} {self.unidad.codigo}"
+
+class AjusteStock(models.Model):
+    usuario = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    motivo = models.CharField(max_length=255)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = "Ajuste de Stock"
+        verbose_name_plural = "Ajustes de Stock"
+
+    def __str__(self):
+        return f"Ajuste {self.id} - {self.motivo}"
+Archivo: inventario/admin.py (COMPLETO)
+Python
+
+from django.contrib import admin
+from .models import Ubicacion, MovimientoStock, AjusteStock
+
+@admin.register(MovimientoStock)
+class MovimientoStockAdmin(admin.ModelAdmin):
+    list_display = ('creado_en', 'producto_display', 'tipo_movimiento', 'cantidad', 'unidad', 'ubicacion', 'documento')
+    list_filter = ('tipo_movimiento', 'ubicacion')
+    search_fields = ('producto__nombre', 'variante__nombre')
+    list_display_links = None
+
+    def producto_display(self, obj):
+        return obj.variante.nombre if obj.variante else obj.producto.nombre
+    producto_display.short_description = "Producto"
+    
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+admin.site.register(Ubicacion)
+admin.site.register(AjusteStock)
+Archivo: inventario/serializers.py (COMPLETO)
+Python
+
+from rest_framework import serializers
+from .models import Ubicacion, MovimientoStock, AjusteStock
+
+class UbicacionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Ubicacion
+        fields = '__all__'
+
+class MovimientoStockSerializer(serializers.ModelSerializer):
+    producto = serializers.StringRelatedField()
+    variante = serializers.StringRelatedField()
+    ubicacion = serializers.StringRelatedField()
+    unidad = serializers.StringRelatedField()
+    creado_por = serializers.StringRelatedField()
+    documento = serializers.StringRelatedField()
+
+    class Meta:
+        model = MovimientoStock
+        fields = '__all__'
+
+class AjusteStockSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AjusteStock
+        fields = '__all__'
+Archivo: inventario/views.py (COMPLETO)
+Python
+
+from rest_framework import viewsets, permissions
+from .models import Ubicacion, MovimientoStock, AjusteStock
+from .serializers import UbicacionSerializer, MovimientoStockSerializer, AjusteStockSerializer
+
+class UbicacionViewSet(viewsets.ModelViewSet):
+    queryset = Ubicacion.objects.all()
+    serializer_class = UbicacionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class MovimientoStockViewSet(viewsets.ModelViewSet):
+    queryset = MovimientoStock.objects.all()
+    serializer_class = MovimientoStockSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'head', 'options'] # Ledger es solo lectura via API
+
+class AjusteStockViewSet(viewsets.ModelViewSet):
+    queryset = AjusteStock.objects.all()
+    serializer_class = AjusteStockSerializer
+    permission_classes = [permissions.IsAuthenticated]
+Archivo: inventario/urls.py (COMPLETO)
+Python
+
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import UbicacionViewSet, MovimientoStockViewSet, AjusteStockViewSet
+
+router = DefaultRouter()
+router.register(r'ubicaciones', UbicacionViewSet, basename='ubicacion')
+router.register(r'movimientos-stock', MovimientoStockViewSet, basename='movimientostock')
+router.register(r'ajustes-stock', AjusteStockViewSet, basename='ajustestock')
+
+urlpatterns = [
+    path('', include(router.urls)),
+]
+3. App gestion (Ventas, Compras, Clientes)
+Esta app ahora depende de catalogo (para los precios) y ya no da error.
+
+Archivo: gestion/models.py (COMPLETO Y CORREGIDO)
+(Esta es la versión que ahora funcionará, ya que catalogo.models.ListaPrecios existe)
+
+Python
+
+from django.db import models
+from django.contrib.auth.models import User
+from django.utils.translation import gettext_lazy as _
+
+# Importamos los modelos de nuestras otras apps
+from catalogo.models import Producto, VarianteProducto, Unidad, ListaPrecios
+from inventario.models import Ubicacion
+
+# --- FASE 3.3: Compras y Proveedores ---
+
+class Proveedor(models.Model):
+    nombre = models.CharField(max_length=255)
+    contacto = models.CharField(max_length=255, null=True, blank=True)
+    ruc = models.CharField(max_length=11, null=True, blank=True, unique=True)
+    condiciones_pago = models.TextField(null=True, blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Proveedor"
+        verbose_name_plural = "Proveedores"
+
+    def __str__(self):
+        return self.nombre
+
+class OrdenCompra(models.Model):
+    class Estado(models.TextChoices):
+        BORRADOR = 'borrador', _('Borrador')
+        ENVIADO = 'enviado', _('Enviado')
+        PARCIAL = 'parcialmente_recibido', _('Parcialmente Recibido')
+        RECIBIDO = 'recibido', _('Recibido')
+        CANCELADO = 'cancelado', _('Cancelado')
+    
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.PROTECT, verbose_name="Proveedor")
+    estado = models.CharField(max_length=30, choices=Estado.choices, default=Estado.BORRADOR, verbose_name="Estado")
+    fecha_entrega_esperada = models.DateField(null=True, blank=True, verbose_name="Fecha de Entrega Esperada")
+    costo_total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00, verbose_name="Costo Total")
+    numero_documento = models.CharField(max_length=100, null=True, blank=True, verbose_name="N° Documento Proveedor")
+    creado_por = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='ordenes_creadas', verbose_name="Creado por")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Orden de Compra"
+        verbose_name_plural = "Órdenes de Compra"
+
+    def __str__(self):
+        return f"OC-{self.id} a {self.proveedor.nombre} ({self.estado})"
+
+class OrdenCompraItem(models.Model):
+    orden_compra = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE, related_name='items', verbose_name="Orden de Compra")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, verbose_name="Producto")
+    variante = models.ForeignKey(VarianteProducto, on_delete=models.PROTECT, null=True, blank=True, verbose_name="Variante")
+    cantidad = models.DecimalField(max_digits=12, decimal_places=4, verbose_name="Cantidad")
+    unidad = models.ForeignKey(Unidad, on_delete=models.PROTECT, verbose_name="Unidad")
+    costo_unitario = models.DecimalField(max_digits=12, decimal_places=4, verbose_name="Costo Unitario")
+    
+    numero_lote = models.CharField(max_length=100, null=True, blank=True, verbose_name="N° Lote")
+    fecha_vencimiento = models.DateField(null=True, blank=True, verbose_name="Fecha de Vencimiento")
+
+    class Meta:
+        verbose_name = "Ítem de Orden de Compra"
+        verbose_name_plural = "Ítems de Órdenes de Compra"
+
+    def __str__(self):
+        return f"{self.cantidad} x {self.producto.nombre}"
+
+# --- FASE 3.4: Clientes y Ventas ---
+
+class Cliente(models.Model):
+    nombre = models.CharField(max_length=255, verbose_name="Nombre")
+    email = models.EmailField(null=True, blank=True, verbose_name="Email")
+    telefono = models.CharField(max_length=20, null=True, blank=True, verbose_name="Teléfono")
+    documento_identidad = models.CharField(max_length=20, null=True, blank=True, unique=True, verbose_name="Documento (RUC/DNI)")
+    lista_precios = models.ForeignKey(ListaPrecios, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Lista de Precios")
+    usuario = models.OneToOneField(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cliente_perfil', verbose_name="Usuario (si aplica)")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Cliente"
+        verbose_name_plural = "Clientes"
+
+    def __str__(self):
+        return self.nombre
+
+class SesionPOS(models.Model):
+    usuario = models.ForeignKey(User, on_delete=models.PROTECT, verbose_name="Usuario (Cajero)")
+    ubicacion = models.ForeignKey(Ubicacion, on_delete=models.PROTECT, verbose_name="Ubicación (Caja)")
+    saldo_apertura = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Saldo Apertura")
+    saldo_cierre = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Saldo Cierre")
+    iniciado_en = models.DateTimeField(auto_now_add=True)
+    cerrado_en = models.DateTimeField(null=True, blank=True)
+    estado = models.CharField(max_length=10, choices=[('abierta', 'Abierta'), ('cerrada', 'Cerrada')], default='abierta', verbose_name="Estado")
+
+    class Meta:
+        verbose_name = "Sesión POS"
+        verbose_name_plural = "Sesiones POS"
+
+    def __str__(self):
+        return f"Caja {self.id} por {self.usuario.username} ({self.estado})"
+
+class Venta(models.Model):
+    class Canal(models.TextChoices):
+        POS = 'pos', _('POS (Tienda)')
+        WEB = 'web', _('Web (E-commerce)')
+    
+    class EstadoVenta(models.TextChoices):
+        BORRADOR = 'borrador', _('Borrador')
+        PEDIDO_RECIBIDO = 'pedido_recibido', _('Pedido Recibido (Web)')
+        PENDIENTE_PAGO = 'pendiente_pago', _('Pendiente de Pago')
+        COMPLETADA = 'completada', _('Completada')
+        CANCELADA = 'cancelada', _('Cancelada')
+
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT, verbose_name="Cliente")
+    usuario = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name="Vendedor")
+    sesion_pos = models.ForeignKey(SesionPOS, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Sesión POS")
+    canal = models.CharField(max_length=10, choices=Canal.choices, default=Canal.POS, verbose_name="Canal")
+    estado = models.CharField(max_length=20, choices=EstadoVenta.choices, default=EstadoVenta.BORRADOR, verbose_name="Estado")
+    
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    impuesto = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    descuento = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total = models.DecimalField(max_digits=12, decimal_places=2)
+    
+    estado_pago = models.CharField(max_length=20, default='pendiente', verbose_name="Estado de Pago")
+    numero_documento = models.CharField(max_length=100, null=True, blank=True, verbose_name="N° Documento (Boleta/Factura)")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Venta"
+        verbose_name_plural = "Ventas"
+
+    def __str__(self):
+        return f"Venta {self.id} - {self.cliente.nombre} - Total: {self.total}"
+
+class VentaItem(models.Model):
+    venta = models.ForeignKey(Venta, on_delete=models.CASCADE, related_name='items', verbose_name="Venta")
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT, verbose_name="Producto")
+    variante = models.ForeignKey(VarianteProducto, on_delete=models.PROTECT, null=True, blank=True, verbose_name="Variante")
+    cantidad = models.DecimalField(max_digits=12, decimal_places=4, verbose_name="Cantidad")
+    unidad = models.ForeignKey(Unidad, on_delete=models.PROTECT, verbose_name="Unidad")
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="Precio Unitario")
+    descuento = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    
+    costo_en_venta = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True, verbose_name="Costo (COGS)")
+    numero_lote_usado = models.CharField(max_length=100, null=True, blank=True, verbose_name="N° Lote Usado")
+    
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Ítem de Venta"
+        verbose_name_plural = "Ítems de Venta"
+
+    def __str__(self):
+        return f"{self.cantidad} x {self.producto.nombre} en Venta {self.venta.id}"
+
+# --- FASE 5: E-commerce (Carrito) ---
+
+class Carrito(models.Model):
+    cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, null=True, blank=True)
+    session_key = models.CharField(max_length=40, null=True, blank=True, db_index=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Carrito"
+        verbose_name_plural = "Carritos"
+
+    def __str__(self):
+        return f"Carrito {self.id}"
+
+class CarritoItem(models.Model):
+    carrito = models.ForeignKey(Carrito, on_delete=models.CASCADE, related_name='items')
+    producto = models.ForeignKey(Producto, on_delete=models.CASCADE)
+    variante = models.ForeignKey(VarianteProducto, on_delete=models.CASCADE, null=True, blank=True)
+    cantidad = models.DecimalField(max_digits=10, decimal_places=3)
+    unidad = models.ForeignKey(Unidad, on_delete=models.PROTECT)
+    precio_aplicado = models.DecimalField(max_digits=10, decimal_places=2)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Ítem de Carrito"
+        verbose_name_plural = "Ítems de Carrito"
+
+    def __str__(self):
+        return f"{self.cantidad} x {self.producto.nombre} en Carrito {self.carrito.id}"
+Archivo: gestion/admin.py (COMPLETO Y CORREGIDO)
+(Esta es la versión limpia que ya no referencia a Precios)
+
+Python
+
+from django.contrib import admin
+from .models import (
+    Proveedor, OrdenCompra, OrdenCompraItem, Cliente, 
+    SesionPOS, Venta, VentaItem, Carrito, CarritoItem
+)
+
+class OrdenCompraItemInline(admin.TabularInline):
+    model = OrdenCompraItem
+    extra = 1
+
+@admin.register(OrdenCompra)
+class OrdenCompraAdmin(admin.ModelAdmin):
+    list_display = ('id', 'proveedor', 'estado', 'costo_total', 'creado_en')
+    list_filter = ('estado', 'proveedor')
+    search_fields = ('id', 'proveedor__nombre')
+    inlines = [OrdenCompraItemInline]
+
+class VentaItemInline(admin.TabularInline):
+    model = VentaItem
+    extra = 0
+    readonly_fields = ('producto', 'variante', 'cantidad', 'unidad', 'precio_unitario', 'subtotal')
+
+@admin.register(Venta)
+class VentaAdmin(admin.ModelAdmin):
+    list_display = ('id', 'cliente', 'canal', 'estado', 'total', 'creado_en')
+    list_filter = ('canal', 'estado', 'cliente')
+    search_fields = ('id', 'cliente__nombre')
+    inlines = [VentaItemInline]
+
+@admin.register(Cliente)
+class ClienteAdmin(admin.ModelAdmin):
+    list_display = ('nombre', 'documento_identidad', 'telefono', 'email', 'lista_precios')
+    search_fields = ('nombre', 'documento_identidad')
+
+admin.site.register(Proveedor)
+admin.site.register(SesionPOS)
+admin.site.register(Carrito)
+Archivo: gestion/serializers.py (COMPLETO Y CORREGIDO)
+(Esta es la versión limpia sin Serializers de Precios)
+
+Python
+
+from rest_framework import serializers
+from .models import (
+    Proveedor, OrdenCompra, OrdenCompraItem, Cliente, 
+    SesionPOS, Venta, VentaItem, Carrito, CarritoItem
+)
+
+class ProveedorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Proveedor
+        fields = '__all__'
+
+class OrdenCompraItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrdenCompraItem
+        fields = '__all__'
+
+class OrdenCompraSerializer(serializers.ModelSerializer):
+    items = OrdenCompraItemSerializer(many=True, read_only=True)
+    proveedor = serializers.StringRelatedField()
+    creado_por = serializers.StringRelatedField()
+
+    class Meta:
+        model = OrdenCompra
+        fields = '__all__'
+
+class ClienteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Cliente
+        fields = '__all__'
+
+class SesionPOSSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SesionPOS
+        fields = '__all__'
+
+class VentaItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VentaItem
+        fields = '__all__'
+
+class VentaSerializer(serializers.ModelSerializer):
+    items = VentaItemSerializer(many=True, read_only=True)
+    cliente = serializers.StringRelatedField()
+    usuario = serializers.StringRelatedField()
+
+    class Meta:
+        model = Venta
+        fields = '__all__'
+
+class CarritoItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CarritoItem
+        fields = '__all__'
+
+class CarritoSerializer(serializers.ModelSerializer):
+    items = CarritoItemSerializer(many=True, read_only=True)
+    class Meta:
+        model = Carrito
+        fields = '__all__'
+Archivo: gestion/views.py (COMPLETO Y CORREGIDO)
+(Esta es la versión limpia sin Viewsets de Precios)
+
+Python
+
+from rest_framework import viewsets, permissions
+from .models import (
+    Proveedor, OrdenCompra, OrdenCompraItem, Cliente, 
+    SesionPOS, Venta, VentaItem, Carrito, CarritoItem
+)
+from .serializers import (
+    ProveedorSerializer, OrdenCompraSerializer, OrdenCompraItemSerializer, 
+    ClienteSerializer, SesionPOSSerializer, VentaSerializer, VentaItemSerializer, 
+    CarritoSerializer, CarritoItemSerializer
+)
+
+class ProveedorViewSet(viewsets.ModelViewSet):
+    queryset = Proveedor.objects.all()
+    serializer_class = ProveedorSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class OrdenCompraViewSet(viewsets.ModelViewSet):
+    queryset = OrdenCompra.objects.prefetch_related('items').all()
+    serializer_class = OrdenCompraSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class OrdenCompraItemViewSet(viewsets.ModelViewSet):
+    queryset = OrdenCompraItem.objects.all()
+    serializer_class = OrdenCompraItemSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class ClienteViewSet(viewsets.ModelViewSet):
+    queryset = Cliente.objects.all()
+    serializer_class = ClienteSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class SesionPOSViewSet(viewsets.ModelViewSet):
+    queryset = SesionPOS.objects.all()
+    serializer_class = SesionPOSSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class VentaViewSet(viewsets.ModelViewSet):
+    queryset = Venta.objects.prefetch_related('items').all()
+    serializer_class = VentaSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class VentaItemViewSet(viewsets.ModelViewSet):
+    queryset = VentaItem.objects.all()
+    serializer_class = VentaItemSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class CarritoViewSet(viewsets.ModelViewSet):
+    queryset = Carrito.objects.prefetch_related('items').all()
+    serializer_class = CarritoSerializer
+    permission_classes = [permissions.AllowAny]
+
+class CarritoItemViewSet(viewsets.ModelViewSet):
+    queryset = CarritoItem.objects.all()
+    serializer_class = CarritoItemSerializer
+    permission_classes = [permissions.AllowAny]
+Archivo: gestion/urls.py (COMPLETO Y CORREGIDO)
+(Esta es la versión limpia sin rutas de Precios)
+
+Python
+
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import (
+    ProveedorViewSet, OrdenCompraViewSet, OrdenCompraItemViewSet, 
+    ClienteViewSet, SesionPOSViewSet, VentaViewSet, VentaItemViewSet, 
+    CarritoViewSet, CarritoItemViewSet
+)
+
+router = DefaultRouter()
+router.register(r'proveedores', ProveedorViewSet, basename='proveedor')
+router.register(r'ordenes-compra', OrdenCompraViewSet, basename='ordencompra')
+router.register(r'ordenes-compra-items', OrdenCompraItemViewSet, basename='ordencompraitem')
+router.register(r'clientes', ClienteViewSet, basename='cliente')
+router.register(r'sesiones-pos', SesionPOSViewSet, basename='sesionpos')
+router.register(r'ventas', VentaViewSet, basename='venta')
+router.register(r'venta-items', VentaItemViewSet, basename='ventaitem')
+router.register(r'carritos', CarritoViewSet, basename='carrito')
+router.register(r'carrito-items', CarritoItemViewSet, basename='carritoitem')
+
+urlpatterns = [
+    path('', include(router.urls)),
+]
+4. App finanzas (Caja y Gastos)
+Archivo: finanzas/models.py (COMPLETO)
+Python
+
+from django.db import models
+from django.contrib.auth.models import User
+from django.utils.translation import gettext_lazy as _
+
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+
+class MetodoPago(models.Model):
+    nombre = models.CharField(max_length=100, unique=True) # Efectivo, Tarjeta, Yape, Plin
+    comision = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Método de Pago"
+        verbose_name_plural = "Métodos de Pago"
+
+    def __str__(self):
+        return self.nombre
+
+class TransaccionCaja(models.Model):
+    class TipoTransaccion(models.TextChoices):
+        VENTA = 'venta', _('Venta')
+        COMPRA = 'compra', _('Compra')
+        GASTO = 'gasto', _('Gasto')
+        APERTURA_CAJA = 'apertura_caja', _('Apertura de Caja')
+        CIERRE_CAJA = 'cierre_caja', _('Cierre de Caja')
+        AJUSTE = 'ajuste', _('Ajuste')
+
+    monto = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Monto (+/-)")
+    tipo = models.CharField(max_length=20, choices=TipoTransaccion.choices, verbose_name="Tipo")
+    metodo_pago = models.ForeignKey(MetodoPago, on_delete=models.PROTECT, verbose_name="Método de Pago")
+    
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    object_id = models.PositiveIntegerField()
+    documento = GenericForeignKey('content_type', 'object_id')
+    
+    descripcion = models.CharField(max_length=255, verbose_name="Descripción")
+    creado_por = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name="Creado por")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Transacción de Caja"
+        verbose_name_plural = "Transacciones de Caja (Ledger)"
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"[{self.tipo}] {self.monto} via {self.metodo_pago.nombre}"
+
+class Gasto(models.Model):
+    categoria = models.CharField(max_length=100, verbose_name="Categoría") # Ej: "Alquiler", "Luz", "Sueldos"
+    monto = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Monto")
+    fecha = models.DateField(verbose_name="Fecha")
+    descripcion = models.TextField(null=True, blank=True, verbose_name="Descripción")
+    pagado_por = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name="Pagado por")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Gasto"
+        verbose_name_plural = "Gastos"
+
+    def __str__(self):
+        return f"Gasto: {self.categoria} - {self.monto}"
+Archivo: finanzas/admin.py (COMPLETO)
+Python
+
+from django.contrib import admin
+from .models import MetodoPago, TransaccionCaja, Gasto
+
+@admin.register(TransaccionCaja)
+class TransaccionCajaAdmin(admin.ModelAdmin):
+    list_display = ('creado_en', 'tipo', 'monto', 'metodo_pago', 'creado_por', 'documento')
+    list_filter = ('tipo', 'metodo_pago', 'creado_por')
+    search_fields = ('descripcion',)
+
+@admin.register(Gasto)
+class GastoAdmin(admin.ModelAdmin):
+    list_display = ('fecha', 'categoria', 'monto', 'pagado_por')
+    list_filter = ('categoria', 'pagado_por')
+    search_fields = ('descripcion', 'categoria')
+
+admin.site.register(MetodoPago)
+Archivo: finanzas/serializers.py (COMPLETO)
+Python
+
+from rest_framework import serializers
+from .models import MetodoPago, TransaccionCaja, Gasto
+
+class MetodoPagoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MetodoPago
+        fields = '__all__'
+
+class TransaccionCajaSerializer(serializers.ModelSerializer):
+    metodo_pago = serializers.StringRelatedField()
+    creado_por = serializers.StringRelatedField()
+    documento = serializers.StringRelatedField()
+    
+    class Meta:
+        model = TransaccionCaja
+        fields = '__all__'
+
+class GastoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Gasto
+        fields = '__all__'
+Archivo: finanzas/views.py (COMPLETO)
+Python
+
+from rest_framework import viewsets, permissions
+from .models import MetodoPago, TransaccionCaja, Gasto
+from .serializers import MetodoPagoSerializer, TransaccionCajaSerializer, GastoSerializer
+
+class MetodoPagoViewSet(viewsets.ModelViewSet):
+    queryset = MetodoPago.objects.all()
+    serializer_class = MetodoPagoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class TransaccionCajaViewSet(viewsets.ModelViewSet):
+    queryset = TransaccionCaja.objects.all()
+    serializer_class = TransaccionCajaSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+class GastoViewSet(viewsets.ModelViewSet):
+    queryset = Gasto.objects.all()
+    serializer_class = GastoSerializer
+    permission_classes = [permissions.IsAuthenticated]
+Archivo: finanzas/urls.py (COMPLETO)
+Python
+
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import MetodoPagoViewSet, TransaccionCajaViewSet, GastoViewSet
+
+router = DefaultRouter()
+router.register(r'metodos-pago', MetodoPagoViewSet, basename='metodopago')
+router.register(r'transacciones-caja', TransaccionCajaViewSet, basename='transaccioncaja')
+router.register(r'gastos', GastoViewSet, basename='gasto')
+
+urlpatterns = [
+    path('', include(router.urls)),
+]
+5. App seguridad (Usuarios y Auditoría)
+Archivo: seguridad/models.py (COMPLETO)
+Python
+
+from django.db import models
+from django.contrib.auth.models import User
+
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+
+class RegistroActividad(models.Model):
+    usuario = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name="Usuario")
+    accion = models.CharField(max_length=255, verbose_name="Acción")
+    
+    content_type = models.ForeignKey(ContentType, on_delete=models.SET_NULL, null=True, verbose_name="Tipo de Objeto")
+    object_id = models.PositiveIntegerField(null=True, verbose_name="ID Objeto")
+    objeto = GenericForeignKey('content_type', 'object_id')
+    
+    datos_anteriores = models.JSONField(null=True, blank=True, verbose_name="Datos Anteriores")
+    datos_nuevos = models.JSONField(null=True, blank=True, verbose_name="Datos Nuevos")
+    
+    ip = models.GenericIPAddressField(null=True, blank=True, verbose_name="IP")
+    user_agent = models.CharField(max_length=255, null=True, blank=True, verbose_name="User Agent")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Registro de Actividad"
+        verbose_name_plural = "Registros de Actividad (Auditoría)"
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(fields=["content_type", "object_id"]),
+        ]
+
+    def __str__(self):
+        username = self.usuario.username if self.usuario else "Sistema"
+        return f"{username} - {self.accion} - {self.creado_en.strftime('%Y-%m-%d %H:%M')}"
+Archivo: seguridad/admin.py (COMPLETO)
+Python
+
+from django.contrib import admin
+from .models import RegistroActividad
+
+@admin.register(RegistroActividad)
+class RegistroActividadAdmin(admin.ModelAdmin):
+    list_display = ('creado_en', 'usuario', 'accion', 'objeto')
+    list_filter = ('usuario', 'content_type', 'accion')
+    search_fields = ('usuario__username', 'accion')
+    readonly_fields = ('creado_en', 'usuario', 'accion', 'content_type', 'object_id', 'objeto', 'datos_anteriores', 'datos_nuevos', 'ip', 'user_agent')
+    
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+Archivo: seguridad/serializers.py (COMPLETO)
+Python
+
+from rest_framework import serializers
+from .models import RegistroActividad
+from django.contrib.auth.models import User, Group, Permission
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'is_staff', 'is_active', 'groups']
+        read_only_fields = ['id']
+
+class GroupSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Group
+        fields = ['id', 'name', 'permissions']
+        read_only_fields = ['id']
+
+class PermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Permission
+        fields = ['id', 'name', 'content_type', 'codename']
+        read_only_fields = ['id']
+
+class RegistroActividadSerializer(serializers.ModelSerializer):
+    usuario = serializers.StringRelatedField()
+    objeto = serializers.StringRelatedField()
+    
+    class Meta:
+        model = RegistroActividad
+        fields = [
+            'id', 'usuario', 'accion', 'objeto', 'datos_anteriores', 
+            'datos_nuevos', 'ip', 'user_agent', 'creado_en'
+        ]
+        read_only_fields = fields
+Archivo: seguridad/views.py (COMPLETO)
+Python
+
+from rest_framework import viewsets, permissions
+from .models import RegistroActividad
+from .serializers import RegistroActividadSerializer, UserSerializer, GroupSerializer, PermissionSerializer
+from django.contrib.auth.models import User, Group, Permission
+
+class UserViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.all().order_by('id')
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+class GroupViewSet(viewsets.ModelViewSet):
+    queryset = Group.objects.all().order_by('id')
+    serializer_class = GroupSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+class PermissionViewSet(viewsets.ModelViewSet):
+    queryset = Permission.objects.all().order_by('id')
+    serializer_class = PermissionSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+class RegistroActividadViewSet(viewsets.ModelViewSet):
+    queryset = RegistroActividad.objects.all()
+    serializer_class = RegistroActividadSerializer
+    permission_classes = [permissions.IsAdminUser]
+    http_method_names = ['get', 'head', 'options']
+Archivo: seguridad/urls.py (COMPLETO)
+Python
+
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import UserViewSet, GroupViewSet, PermissionViewSet, RegistroActividadViewSet
+
+router = DefaultRouter()
+router.register(r'usuarios', UserViewSet, basename='usuario')
+router.register(r'roles', GroupViewSet, basename='rol')
+router.register(r'permisos', PermissionViewSet, basename='permiso')
+router.register(r'registros-actividad', RegistroActividadViewSet, basename='registroactividad')
+
+urlpatterns = [
+    path('', include(router.urls)),
+]
+6. Configuración del Proyecto (minimarket_api)
+Archivo: minimarket_api/settings.py (COMPLETO)
+(Pega todo el contenido. Asegúrate de que DATABASES tenga tu configuración de MySQL correcta)
+
+Python
+
+from pathlib import Path
+
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+# Quick-start development settings - unsuitable for production
+# See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
+
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = 'django-insecure-=+d!7)8s9(g+u=u(q8c9c(0q&s-7w%c+56h!9)v!#8=5)g5k#*'
+
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = True
+
+ALLOWED_HOSTS = []
+
+
+# Application definition
+
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+
+    # Nuestras Apps
+    'catalogo.apps.CatalogoConfig',
+    'inventario.apps.InventarioConfig',
+    'gestion.apps.GestionConfig',
+    'finanzas.apps.FinanzasConfig',
+    'seguridad.apps.SeguridadConfig',
+    
+    # Apps de Terceros
+    'rest_framework',
+    'rest_framework.authtoken',
+    'corsheaders',
+]
+
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+ROOT_URLCONF = 'minimarket_api.urls'
+
+TEMPLATES = [
+    {
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            'context_processors': [
+                'django.template.context_processors.debug',
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.contrib.messages.context_processors.messages',
+            ],
+        },
+    },
+]
+
+WSGI_APPLICATION = 'minimarket_api.wsgi.application'
+
+
+# Database
+# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': 'BDminimarket',
+        'USER': 'root',
+        'PASSWORD': '',
+        'HOST': 'localhost',
+        'PORT': '3306',
+        'OPTIONS': {
+            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+        },
+    }
+}
+
+
+# Password validation
+# https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
+
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+    },
+]
+
+
+# Internationalization
+# https://docs.djangoproject.com/en/4.2/topics/i18n/
+
+LANGUAGE_CODE = 'es-pe'
+
+TIME_ZONE = 'America/Lima'
+
+USE_I18N = True
+
+USE_TZ = True
+
+
+# Static files (CSS, JavaScript, Images)
+# https://docs.djangoproject.com/en/4.2/howto/static-files/
+
+STATIC_URL = 'static/'
+
+# Default primary key field type
+# https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# --- Configuración de CORS ---
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173", # Puerto por defecto de Vue/Vite
+    "http://localhost:8080", 
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8080",
+]
+
+# --- Configuración de Django REST Framework ---
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 10
+}
+Archivo: minimarket_api/urls.py (COMPLETO)
+(Esta es la "puerta de entrada" principal que conecta todo)
+
+Python
+
+from django.contrib import admin
+from django.urls import path, include
+from rest_framework.authtoken import views as authtoken_views
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    
+    # API Endpoints
+    path('api/catalogo/', include('catalogo.urls')),
+    path('api/inventario/', include('inventario.urls')),
+    path('api/gestion/', include('gestion.urls')),
+    path('api/finanzas/', include('finanzas.urls')),
+    path('api/seguridad/', include('seguridad.urls')),
+    
+    # Autenticación
+    path('api/auth-token/', authtoken_views.obtain_auth_token, name='api_auth_token'),
+]
+
+
+Front: 1. Mejoras Visuales y Responsive (AdminLayout.vue)
+Reemplaza todo el contenido de src/layouts/AdminLayout.vue con esta versión mejorada. Incluye algunos ajustes básicos para que se vea mejor en diferentes tamaños de pantalla (aunque un diseño responsive completo requeriría más trabajo o una librería UI).
+
+Archivo: src/layouts/AdminLayout.vue (COMPLETO Y MEJORADO)
+
+Fragmento de código
+
+<template>
+  <div class="admin-layout">
+    <header class="navbar">
+      <div class="navbar-brand">
+         <img src="/favicon.ico" alt="Logo" class="logo">
+         <span>Minimarket Admin</span>
+      </div>
+      <div class="navbar-user">
+        <span>Hola, {{ authStore.getUsername }}</span>
+        <button @click="logout" class="logout-button">Cerrar Sesión</button>
+      </div>
+       </header>
+    <div class="main-content">
+      <aside class="sidebar">
+        <nav>
+          <ul>
+            <li><router-link :to="{ name: 'admin-dashboard' }">Dashboard</router-link></li>
+
+            <li class="menu-header">CATÁLOGO</li>
+            <li><router-link :to="{ name: 'admin-products' }">Productos</router-link></li>
+            <li><router-link :to="{ name: 'admin-categories' }">Categorías</router-link></li>
+            <li><router-link :to="{ name: 'admin-units' }">Unidades</router-link></li>
+            <li><router-link :to="{ name: 'admin-brands' }">Marcas</router-link></li>
+            <li><router-link :to="{ name: 'admin-taxes' }">Impuestos</router-link></li>
+            <li><router-link :to="{ name: 'admin-pricelists' }">Listas Precios</router-link></li>
+
+            <li class="menu-header">INVENTARIO</li>
+            <li class="menu-header">GESTIÓN</li>
+             <li class="menu-header">FINANZAS</li>
+             <li class="menu-header">SEGURIDAD</li>
+             </ul>
+        </nav>
+      </aside>
+      <main class="content-area">
+        <router-view v-slot="{ Component }">
+          <transition name="fade" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
+      </main>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { useAuthStore } from '@/stores/auth';
+import { useRouter } from 'vue-router';
+
+const authStore = useAuthStore();
+const router = useRouter();
+
+const logout = () => {
+  authStore.logout();
+};
+
+if (!authStore.isAuthenticated) {
+  router.push({ name: 'login' });
+}
+</script>
+
+<style scoped>
+:root {
+  --sidebar-width: 240px;
+  --navbar-height: 60px;
+}
+
+.admin-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background-color: #f8f9fa;
+}
+.navbar {
+  height: var(--navbar-height);
+  background-color: #ffffff;
+  color: #343a40;
+  padding: 0 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  flex-shrink: 0; /* Evita que se encoja */
+}
+.navbar-brand {
+  display: flex;
+  align-items: center;
+  font-weight: bold;
+  font-size: 1.2rem;
+}
+.logo {
+  width: 24px;
+  height: 24px;
+  margin-right: 10px;
+}
+.navbar-user span {
+  margin-right: 15px;
+  color: #495057;
+}
+.logout-button {
+  background-color: #dc3545;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+.main-content {
+  display: flex;
+  flex-grow: 1;
+  /* Calcular altura restante para habilitar scroll independiente */
+  height: calc(100vh - var(--navbar-height));
+}
+.sidebar {
+  width: var(--sidebar-width);
+  background-color: #343a40;
+  color: #adb5bd;
+  padding: 20px 0;
+  flex-shrink: 0;
+  overflow-y: auto; /* Scroll si el menú es muy largo */
+}
+.sidebar ul { list-style: none; padding: 0; margin: 0; }
+.sidebar li { margin: 0; }
+.sidebar a {
+  display: block;
+  padding: 12px 20px;
+  text-decoration: none;
+  color: #adb5bd;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  border-left: 3px solid transparent;
+  white-space: nowrap; /* Evita que el texto se parta */
+}
+.sidebar a:hover { background-color: #495057; color: #ffffff; }
+.sidebar a.router-link-exact-active {
+  background-color: #007bff;
+  color: #ffffff;
+  font-weight: 500; /* Un poco menos bold */
+  border-left-color: #ffffff;
+}
+.menu-header {
+  padding: 15px 20px 8px;
+  font-size: 0.75rem; /* Más pequeño */
+  color: #6c757d;
+  text-transform: uppercase;
+  font-weight: bold;
+  letter-spacing: 0.5px; /* Espaciado ligero */
+}
+.content-area {
+  flex-grow: 1;
+  padding: 30px;
+  overflow-y: auto; /* Scroll principal */
+}
+
+/* Transiciones */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* Media Query Simple (Ejemplo para ocultar sidebar en pantallas pequeñas) */
+@media (max-width: 768px) {
+  /* .sidebar {
+    position: fixed;
+    left: -var(--sidebar-width);
+    height: calc(100vh - var(--navbar-height));
+    transition: left 0.3s ease;
+    z-index: 999;
+  } */
+  /* Necesitaríamos JS para mostrar/ocultar el sidebar con un botón */
+   .sidebar { display: none; } /* Ocultar por simplicidad ahora */
+   .content-area { padding: 15px; } /* Menos padding en móvil */
+}
+</style>
+2. Código Completo: Módulo Catálogo (Frontend)
+Ahora, el código completo para cada sección del catálogo.
+
+2.1 Categorías
+(Ya teníamos gran parte, aquí está la versión final consistente)
+
+Archivo: src/stores/categories.js (COMPLETO) (Este ya estaba casi completo, lo incluyo por consistencia)
+
+JavaScript
+
+import { defineStore } from 'pinia';
+import apiClient from '@/services/api';
+import { ref } from 'vue';
+
+export const useCategoryStore = defineStore('categories', () => {
+  const categories = ref([]);
+  const loading = ref(false);
+  const error = ref(null);
+  const currentCategory = ref(null);
+
+  async function fetchCategories() {
+    loading.value = true;
+    error.value = null;
+    try {
+      // Pedir todas las categorías sin paginación para los selects
+      const response = await apiClient.get('/catalogo/categorias/?page_size=1000');
+      categories.value = response.data.results;
+    } catch (err) {
+      console.error("Error fetching categories:", err);
+      error.value = 'No se pudieron cargar las categorías.';
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function fetchCategory(id) {
+    loading.value = true;
+    error.value = null;
+    currentCategory.value = null;
+    try {
+      const response = await apiClient.get(`/catalogo/categorias/${id}/`);
+      currentCategory.value = response.data;
+    } catch (err) {
+      console.error(`Error fetching category ${id}:`, err);
+      error.value = 'No se pudo cargar la categoría.';
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function createCategory(categoryData) {
+    loading.value = true;
+    error.value = null;
+    try {
+      const response = await apiClient.post('/catalogo/categorias/', categoryData);
+      await fetchCategories();
+      return response.data;
+    } catch (err) {
+      console.error("Error creating category:", err.response?.data || err);
+      error.value = err.response?.data?.nombre?.[0] || 'Error al crear la categoría.';
+      return null;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function updateCategory(id, categoryData) {
+    loading.value = true;
+    error.value = null;
+    try {
+      const response = await apiClient.put(`/catalogo/categorias/${id}/`, categoryData);
+      await fetchCategories();
+      currentCategory.value = null;
+      return response.data;
+    } catch (err) {
+      console.error(`Error updating category ${id}:`, err.response?.data || err);
+      error.value = err.response?.data?.nombre?.[0] || 'Error al actualizar la categoría.';
+      return null;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+   async function deleteCategory(id) {
+    loading.value = true;
+    error.value = null;
+    try {
+      await apiClient.delete(`/catalogo/categorias/${id}/`);
+      await fetchCategories();
+    } catch (err) {
+      console.error(`Error deleting category ${id}:`, err);
+      if (err.response && err.response.status >= 400 && err.response.data?.detail?.includes('protected')) {
+           error.value = 'No se puede eliminar: la categoría está en uso.';
+      } else {
+           error.value = 'Error al eliminar la categoría.';
+      }
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  return {
+    categories, loading, error, currentCategory,
+    fetchCategories, fetchCategory, createCategory, updateCategory, deleteCategory
+  }
+});
+Archivo: src/views/admin/categories/CategoryListView.vue (COMPLETO) (Este ya estaba casi completo, lo incluyo por consistencia)
+
+Fragmento de código
+
+<template>
+  <div class="list-view-container">
+    <h1>Gestión de Categorías</h1>
+    <button @click="openModal()" class="add-button">Nueva Categoría</button>
+
+    <div v-if="loading" class="loading">Cargando...</div>
+    <div v-if="error" class="error-message global-error">{{ error }}</div>
+
+    <table v-if="!loading && categories.length > 0" class="data-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Nombre</th>
+          <th>Categoría Padre</th>
+          <th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="category in categories" :key="category.id">
+          <td>{{ category.id }}</td>
+          <td>{{ category.nombre }}</td>
+          <td>{{ getParentCategoryName(category.padre) }}</td>
+          <td class="actions">
+            <button @click="openModal(category)" class="edit-button" title="Editar">✏️</button>
+            <button @click="confirmDelete(category)" class="delete-button" title="Eliminar">🗑️</button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+     <p v-if="!loading && categories.length === 0">No hay categorías registradas.</p>
+
+    <SimpleModal :show="showModal" @close="closeModal">
+        <h2>{{ editingCategory ? 'Editar Categoría' : 'Nueva Categoría' }}</h2>
+        <form @submit.prevent="handleSubmit" class="modal-form">
+          <div class="form-group">
+            <label for="categoryName">Nombre:</label>
+            <input type="text" id="categoryName" v-model="categoryForm.nombre" required>
+          </div>
+           <div class="form-group">
+            <label for="categoryParent">Categoría Padre (Opcional):</label>
+            <select id="categoryParent" v-model="categoryForm.padre">
+              <option :value="null">-- Ninguna --</option>
+              <option v-for="cat in availableParents" :key="cat.id" :value="cat.id">
+                {{ cat.nombre }}
+              </option>
+            </select>
+          </div>
+           <p v-if="formError" class="error-message">{{ formError }}</p>
+          <div class="modal-actions">
+            <button type="button" @click="closeModal" class="cancel-button">Cancelar</button>
+            <button type="submit" :disabled="loading" class="save-button">
+              {{ loading ? 'Guardando...' : 'Guardar' }}
+            </button>
+          </div>
+        </form>
+    </SimpleModal>
+
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, computed } from 'vue';
+import { useCategoryStore } from '@/stores/categories';
+import { storeToRefs } from 'pinia';
+import SimpleModal from '@/components/SimpleModal.vue'; // Asumiendo que crearás este componente
+
+const categoryStore = useCategoryStore();
+const { categories, loading, error } = storeToRefs(categoryStore);
+
+const showModal = ref(false);
+const editingCategory = ref(null);
+const categoryForm = ref({ nombre: '', padre: null });
+const formError = ref(null);
+
+onMounted(() => { categoryStore.fetchCategories(); });
+
+const getParentCategoryName = (parentId) => {
+  if (!parentId) return '-';
+  const parent = categories.value.find(cat => cat.id === parentId);
+  return parent ? parent.nombre : 'ID: '+parentId; // Mostrar ID si no se encuentra
+};
+
+const openModal = (category = null) => {
+  formError.value = null; error.value = null; // Limpiar errores
+  if (category) {
+    editingCategory.value = category;
+    categoryForm.value.nombre = category.nombre;
+    categoryForm.value.padre = category.padre;
+  } else {
+    editingCategory.value = null;
+    categoryForm.value = { nombre: '', padre: null };
+  }
+  showModal.value = true;
+};
+
+const closeModal = () => { showModal.value = false; editingCategory.value = null; };
+
+const handleSubmit = async () => {
+  formError.value = null; error.value = null;
+  let result = null;
+  const dataToSend = { ...categoryForm.value };
+  // Asegurar que padre sea null si no se selecciona
+  if (dataToSend.padre === undefined || dataToSend.padre === '') {
+      dataToSend.padre = null;
+  }
+
+  if (editingCategory.value) {
+    result = await categoryStore.updateCategory(editingCategory.value.id, dataToSend);
+  } else {
+    result = await categoryStore.createCategory(dataToSend);
+  }
+
+  if (result) {
+    closeModal();
+  } else {
+      formError.value = categoryStore.error; // Mostrar error en el form
+  }
+};
+
+const confirmDelete = (category) => {
+   error.value = null; // Limpiar error global
+  if (window.confirm(`¿Eliminar categoría "${category.nombre}"?`)) {
+    categoryStore.deleteCategory(category.id);
+  }
+};
+
+const availableParents = computed(() => {
+  if (editingCategory.value) {
+    return categories.value.filter(cat => cat.id !== editingCategory.value.id);
+  }
+  return categories.value;
+});
+</script>
+
+<style scoped>
+/* Importar estilos comunes si los tienes */
+/* @import '@/assets/admin-tables.css'; */
+/* @import '@/assets/admin-modals.css'; */
+
+/* Estilos básicos si no usas archivos externos */
+.list-view-container { padding: 20px; }
+.add-button { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 20px; font-size: 1rem; }
+.add-button:hover { background-color: #0056b3; }
+.loading { margin-top: 20px; font-style: italic; color: #6c757d; }
+.error-message { color: #dc3545; margin-top: 10px; }
+.global-error { border: 1px solid #dc3545; background-color: #f8d7da; padding: 10px; border-radius: 4px; margin-bottom: 15px;}
+.data-table { width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.data-table th, .data-table td { border: 1px solid #dee2e6; padding: 12px 15px; text-align: left; }
+.data-table th { background-color: #f8f9fa; font-weight: bold; }
+.data-table tbody tr:nth-child(even) { background-color: #f8f9fa; }
+.actions button { padding: 5px 8px; border: none; border-radius: 3px; cursor: pointer; margin-right: 5px; font-size: 1rem; background: none;}
+.edit-button { color: #ffc107; }
+.delete-button { color: #dc3545; }
+
+/* Estilos Modal (necesitas crear SimpleModal.vue) */
+.modal-form .form-group { margin-bottom: 15px; }
+.modal-form label { display: block; margin-bottom: 5px; font-weight: bold; }
+.modal-form input, .modal-form select { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
+.modal-actions { display: flex; justify-content: flex-end; margin-top: 20px; gap: 10px; }
+.modal-actions button { padding: 8px 15px; border: none; border-radius: 4px; cursor: pointer; }
+.cancel-button { background-color: #6c757d; color: white; }
+.save-button { background-color: #28a745; color: white; }
+.save-button:disabled { background-color: #aaa; }
+</style>
+Crea el Componente de Modal: (Necesario para el formulario)
+
+Crea la carpeta: src/components Crea el archivo: src/components/SimpleModal.vue (COMPLETO)
+
+Fragmento de código
+
+<template>
+  <transition name="modal-fade">
+    <div v-if="show" class="modal-overlay" @click.self="$emit('close')">
+      <div class="modal-content">
+        <button class="modal-close" @click="$emit('close')">&times;</button>
+        <slot></slot> </div>
+    </div>
+  </transition>
+</template>
+
+<script setup>
+defineProps({
+  show: Boolean
+});
+defineEmits(['close']);
+</script>
+
+<style scoped>
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.6); /* Más oscuro */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1050; /* Bootstrap z-index */
+}
+
+.modal-content {
+  background-color: white;
+  padding: 25px 30px; /* Más padding */
+  border-radius: 8px;
+  width: 90%;
+  max-width: 550px; /* Un poco más ancho */
+  box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+  position: relative; /* Para el botón de cerrar */
+  max-height: 90vh; /* Altura máxima */
+  overflow-y: auto; /* Scroll si es necesario */
+}
+
+.modal-close {
+  position: absolute;
+  top: 10px;
+  right: 15px;
+  background: none;
+  border: none;
+  font-size: 1.8rem; /* Más grande */
+  color: #6c757d; /* Gris */
+  cursor: pointer;
+  line-height: 1; /* Alinear mejor la X */
+}
+.modal-close:hover {
+  color: #343a40; /* Más oscuro */
+}
+
+/* Transición Fade */
+.modal-fade-enter-active, .modal-fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.modal-fade-enter-from, .modal-fade-leave-to {
+  opacity: 0;
+}
+</style>
+2.2 Productos (Implementación Completa del Formulario)
+(La Store products.js y la Vista ProductListView.vue ya las tienes de la respuesta anterior, solo asegúrate de que el código sea el último que te di)
+
+Archivo: src/components/admin/products/ProductForm.vue (COMPLETO Y FUNCIONAL) (Reemplaza el contenido del archivo que creamos antes)
+
+Fragmento de código
+
+<template>
+  <div class="product-form-container">
+    <h2>{{ isEditing ? 'Editar Producto' : 'Nuevo Producto' }}</h2>
+    <form @submit.prevent="submitForm">
+      <div v-if="formError" class="error-message global-error">{{ formError }}</div>
+
+      <div class="form-grid">
+        <FormField label="Nombre:" required>
+          <input type="text" v-model="productData.nombre" required>
+        </FormField>
+        <FormField label="SKU:">
+          <input type="text" v-model="productData.sku">
+        </FormField>
+         <FormField label="Tipo:" required>
+          <select v-model="productData.tipo" required>
+            <option value="simple">Simple</option>
+            <option value="variable">Variable</option>
+            <option value="combo">Combo</option>
+          </select>
+        </FormField>
+        <FormField label="Categoría:" required>
+          <select v-model="productData.categoria" required>
+             <option :value="null">-- Seleccione --</option>
+             <option v-for="cat in categoryOptions" :key="cat.id" :value="cat.id">{{ cat.nombre }}</option>
+          </select>
+        </FormField>
+        <FormField label="Marca:">
+           <select v-model="productData.marca">
+             <option :value="null">-- Seleccione --</option>
+             <option v-for="brand in brandOptions" :key="brand.id" :value="brand.id">{{ brand.nombre }}</option>
+          </select>
+           <small v-if="brandLoading">Cargando marcas...</small>
+        </FormField>
+         <FormField label="Unidad Base:" required>
+           <select v-model="productData.unidad_base" required>
+            <option :value="null">-- Seleccione --</option>
+             <option v-for="unit in unitOptions" :key="unit.id" :value="unit.id">{{ unit.nombre }} ({{ unit.codigo }})</option>
+          </select>
+            <small v-if="unitLoading">Cargando unidades...</small>
+        </FormField>
+         <FormField label="Clase Impuesto:">
+           <select v-model="productData.clase_impuesto">
+             <option :value="null">-- Ninguno --</option>
+              <option v-for="tax in taxOptions" :key="tax.id" :value="tax.id">{{ tax.nombre }}</option>
+          </select>
+           <small v-if="taxLoading">Cargando impuestos...</small>
+        </FormField>
+        <FormField label="Umbral Bajo Stock:">
+          <input type="number" step="any" min="0" v-model.number="productData.umbral_bajo_stock">
+        </FormField>
+         <FormField label="URL Imagen:">
+          <input type="url" v-model="productData.imagen_url">
+        </FormField>
+      </div>
+
+       <FormField label="Descripción:" class="full-width">
+          <textarea v-model="productData.descripcion" rows="3"></textarea>
+      </FormField>
+
+       <div class="form-group checkboxes">
+          <label><input type="checkbox" v-model="productData.es_vendible"> Es Vendible</label>
+          <label><input type="checkbox" v-model="productData.es_comprable"> Es Comprable</label>
+          <label><input type="checkbox" v-model="productData.es_producto_fisico"> Es Producto Físico</label>
+      </div>
+
+       <section v-if="productData.tipo === 'variable'" class="variants-section">
+         <h3>Variantes del Producto</h3>
+          <small class="error-message" v-if="variantError">{{ variantError }}</small>
+         <div v-for="(variant, index) in productData.variantes" :key="index" class="variant-item">
+            <input type="text" v-model="variant.nombre" placeholder="Nombre Variante (ej: 500g)" required>
+            <input type="text" v-model="variant.sku" placeholder="SKU Variante (opcional)">
+            <input type="number" step="0.01" min="0" v-model.number="variant.precio_sobrescrito" placeholder="Precio (opcional)">
+            <input type="text" v-model="variant.datos_atributo_str" placeholder='Atributos JSON (ej: {"peso": "500g"})'>
+            <button type="button" @click="removeVariant(index)" class="remove-variant-btn">✖</button>
+         </div>
+         <button type="button" @click="addVariant" class="add-variant-btn">+ Añadir Variante</button>
+       </section>
+
+       <section v-if="productData.tipo === 'combo'" class="combo-section">
+         <h3>Items del Combo</h3>
+          <small class="error-message" v-if="comboError">{{ comboError }}</small>
+         <div v-for="(item, index) in productData.items_combo" :key="index" class="combo-item">
+            <select v-model="item.producto_item" required>
+                 <option :value="null">-- Seleccione Producto --</option>
+                 <option v-for="p in simpleProductsForCombo" :key="p.id" :value="p.id">{{ p.nombre }}</option>
+            </select>
+            <input type="number" step="any" min="0.001" v-model.number="item.cantidad_item" placeholder="Cantidad" required>
+             <button type="button" @click="removeItemCombo(index)" class="remove-item-btn">✖</button>
+         </div>
+         <button type="button" @click="addItemCombo" class="add-item-btn">+ Añadir Item al Combo</button>
+       </section>
+
+      <div class="form-actions">
+        <button type="button" @click="cancelForm" class="cancel-button">Cancelar</button>
+        <button type="submit" :disabled="isSubmitting" class="save-button">
+          {{ isSubmitting ? 'Guardando...' : (isEditing ? 'Actualizar Producto' : 'Crear Producto') }}
+        </button>
+      </div>
+    </form>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted, computed, watch, reactive } from 'vue';
+import { useProductStore } from '@/stores/products';
+import { useCategoryStore } from '@/stores/categories';
+import { useBrandStore } from '@/stores/brands'; // Necesitas crear esta store
+import { useUnitStore } from '@/stores/units';   // Necesitas crear esta store
+import { useTaxStore } from '@/stores/taxes';     // Necesitas crear esta store
+import { storeToRefs } from 'pinia';
+import { useRouter, useRoute } from 'vue-router';
+import FormField from '@/components/FormField.vue'; // Asumiendo componente para labels/inputs
+
+const props = defineProps({ productId: { type: [String, Number], default: null } });
+
+const productStore = useProductStore();
+const categoryStore = useCategoryStore();
+const brandStore = useBrandStore();
+const unitStore = useUnitStore();
+const taxStore = useTaxStore();
+
+const router = useRouter();
+const route = useRoute();
+
+const isEditing = computed(() => !!props.productId);
+const formError = ref(null);
+const isSubmitting = ref(false); // Para controlar el estado de envío
+
+// Usar reactive para manejar el objeto complejo del formulario
+const productData = reactive({
+  nombre: '', sku: '', descripcion: '', tipo: 'simple',
+  marca: null, categoria: null, clase_impuesto: null, unidad_base: null,
+  es_vendible: true, es_comprable: true, es_producto_fisico: true,
+  umbral_bajo_stock: null, imagen_url: '',
+  variantes: [], // Para tipo 'variable'
+  items_combo: [] // Para tipo 'combo'
+});
+
+// Cargar opciones para selects
+const { categories: categoryOptions, loading: catLoading } = storeToRefs(categoryStore);
+const { brands: brandOptions, loading: brandLoading } = storeToRefs(brandStore);
+const { units: unitOptions, loading: unitLoading } = storeToRefs(unitStore);
+const { taxes: taxOptions, loading: taxLoading } = storeToRefs(taxStore);
+const { products: allProducts } = storeToRefs(productStore); // Para combo
+
+onMounted(async () => {
+  // Cargar todas las opciones necesarias
+  categoryStore.fetchCategories();
+  brandStore.fetchBrands(); // Cargar marcas
+  unitStore.fetchUnits();   // Cargar unidades
+  taxStore.fetchTaxes();     // Cargar impuestos
+  productStore.fetchProducts(1, '', 1000); // Cargar productos para combo (sin paginación)
+
+  if (isEditing.value) {
+    await productStore.fetchProduct(props.productId);
+    if (productStore.product) {
+        // Mapear datos al estado reactivo
+        Object.assign(productData, {
+            ...productStore.product,
+            // Asegurar IDs para FKs
+            marca: productStore.product.marca || null,
+            categoria: productStore.product.categoria_id || null, // API da categoria (string) y no ID?
+            clase_impuesto: productStore.product.clase_impuesto || null,
+            unidad_base: productStore.product.unidad_base_id || null, // API da unidad_base (string)?
+            // Mapear variantes y combos si existen
+            variantes: (productStore.product.variantes || []).map(v => ({...v, datos_atributo_str: JSON.stringify(v.datos_atributo || {}) })),
+            items_combo: (productStore.product.items_combo || []).map(c => ({...c, producto_item: c.producto_item_id})) // Asumiendo API devuelve ID
+        });
+        // Corrección FKs si API devuelve objetos
+         productData.marca = productStore.product.marca?.id ?? productData.marca;
+         productData.clase_impuesto = productStore.product.clase_impuesto?.id ?? productData.clase_impuesto;
+    } else {
+        formError.value = "No se pudo cargar el producto para editar.";
+    }
+  }
+});
+
+// --- Lógica Variantes ---
+const variantError = ref(null);
+const addVariant = () => {
+    productData.variantes.push({ nombre: '', sku: '', precio_sobrescrito: null, datos_atributo_str: '{}' });
+};
+const removeVariant = (index) => {
+    productData.variantes.splice(index, 1);
+};
+const validateAndParseVariants = () => {
+    variantError.value = null;
+    const parsedVariants = [];
+    for (const variant of productData.variantes) {
+        if (!variant.nombre) {
+            variantError.value = "Todas las variantes deben tener un nombre.";
+            return null;
+        }
+        try {
+            variant.datos_atributo = JSON.parse(variant.datos_atributo_str || '{}');
+            // Eliminar la versión string antes de enviar
+            const { datos_atributo_str, ...rest } = variant;
+            parsedVariants.push(rest);
+        } catch (e) {
+            variantError.value = `Error en JSON de atributos de la variante "${variant.nombre}": ${e.message}`;
+            return null;
+        }
+    }
+    return parsedVariants;
+}
+
+// --- Lógica Combos ---
+const comboError = ref(null);
+const simpleProductsForCombo = computed(() => {
+    // Filtrar productos que no sean tipo 'combo' para evitar recursión
+    return allProducts.value.filter(p => p.tipo !== 'combo');
+});
+const addItemCombo = () => {
+    productData.items_combo.push({ producto_item: null, cantidad_item: 1 });
+};
+const removeItemCombo = (index) => {
+    productData.items_combo.splice(index, 1);
+};
+const validateCombos = () => {
+    comboError.value = null;
+    for (const item of productData.items_combo) {
+        if (!item.producto_item || !item.cantidad_item || item.cantidad_item <= 0) {
+            comboError.value = "Todos los items del combo deben tener un producto y cantidad válida.";
+            return false;
+        }
+    }
+    return true;
+}
+
+// Enviar formulario
+const submitForm = async () => {
+  formError.value = null;
+  isSubmitting.value = true;
+
+  const dataToSend = { ...productData };
+
+  // Limpiar/Validar Variantes si aplica
+  if (dataToSend.tipo === 'variable') {
+      const parsedVariants = validateAndParseVariants();
+      if (!parsedVariants) { isSubmitting.value = false; return; }
+      dataToSend.variantes_set = parsedVariants; // DRF anidado espera _set
+      dataToSend.items_combo = undefined; // No enviar combos
+      dataToSend.items_combo_set = [];
+  } else {
+      dataToSend.variantes = undefined; // No enviar variantes
+      dataToSend.variantes_set = [];
+  }
+
+  // Limpiar/Validar Combos si aplica
+  if (dataToSend.tipo === 'combo') {
+      if (!validateCombos()) { isSubmitting.value = false; return; }
+      dataToSend.items_combo_set = dataToSend.items_combo; // DRF anidado espera _set
+      dataToSend.variantes = undefined; // No enviar variantes
+      dataToSend.variantes_set = [];
+  } else if (dataToSend.tipo !== 'variable') { // Si no es combo ni variable
+      dataToSend.items_combo = undefined; // No enviar combos
+      dataToSend.items_combo_set = [];
+  }
+
+  // Ajustar campos numéricos y FKs
+  if (dataToSend.umbral_bajo_stock === '' || dataToSend.umbral_bajo_stock === null) dataToSend.umbral_bajo_stock = null;
+  else dataToSend.umbral_bajo_stock = Number(dataToSend.umbral_bajo_stock)
+
+  // Asegurar que las FK envíen solo el ID
+  dataToSend.marca = dataToSend.marca || null;
+  dataToSend.categoria = dataToSend.categoria || null;
+  dataToSend.unidad_base = dataToSend.unidad_base || null;
+  dataToSend.clase_impuesto = dataToSend.clase_impuesto || null;
+
+  // Remover campos extra antes de enviar
+  delete dataToSend.variantes;
+  delete dataToSend.items_combo;
+
+  console.log("Enviando datos:", dataToSend); // Para depurar
+
+  let result = null;
+  try {
+      if (isEditing.value) {
+          result = await productStore.updateProduct(props.productId, dataToSend);
+      } else {
+          result = await productStore.createProduct(dataToSend);
+      }
+
+      if (result) {
+          router.push({ name: 'admin-products' });
+      } else {
+          formError.value = productStore.error || "Ocurrió un error desconocido.";
+      }
+  } catch(e) {
+      console.error("Error inesperado en submitForm:", e);
+      formError.value = "Error inesperado al guardar.";
+  } finally {
+      isSubmitting.value = false;
+  }
+};
+
+const cancelForm = () => { router.push({ name: 'admin-products' }); };
+</script>
+
+<style scoped>
+.product-form-container { padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.product-form-container h2 { margin-top: 0; margin-bottom: 30px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px 25px; } /* Más gap horizontal */
+.form-group { margin-bottom: 0; /* Controlado por el grid gap */ }
+.form-group.full-width { grid-column: 1 / -1; }
+.form-group.checkboxes { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 15px 30px; align-items: center; padding-top: 10px;}
+.form-group.checkboxes label { display: flex; align-items: center; gap: 8px; margin-bottom: 0; font-weight: normal;}
+.form-group.checkboxes input[type="checkbox"] { width: auto; }
+label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 0.9rem; color: #495057;}
+input[type="text"], input[type="number"], input[type="url"], select, textarea { width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; font-size: 0.95rem;}
+input:focus, select:focus, textarea:focus { border-color: #80bdff; outline: 0; box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25); }
+textarea { resize: vertical; min-height: 80px;}
+small { font-size: 0.8rem; color: #6c757d; display: block; margin-top: 4px;}
+
+.error-message { color: #dc3545; margin-bottom: 15px; font-size: 0.9rem; }
+.global-error { border: 1px solid #dc3545; background-color: #f8d7da; padding: 10px; border-radius: 4px; }
+
+/* Estilos Secciones Variantes y Combo */
+.variants-section, .combo-section { margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px; }
+.variants-section h3, .combo-section h3 { margin-bottom: 15px; }
+.variant-item, .combo-item { display: grid; grid-template-columns: 2fr 1fr 1fr auto auto; /* Ajustado para combo */ gap: 10px; align-items: center; margin-bottom: 10px; padding: 10px; background-color: #f8f9fa; border-radius: 4px; }
+.combo-item { grid-template-columns: 3fr 1fr auto; } /* Layout diferente para combo */
+.variant-item input, .combo-item input, .combo-item select { font-size: 0.9rem; padding: 8px; }
+.remove-variant-btn, .remove-item-btn { background: none; border: none; color: #dc3545; cursor: pointer; font-size: 1.2rem; padding: 0 5px; }
+.add-variant-btn, .add-item-btn { background-color: #e9ecef; color: #495057; border: 1px dashed #ced4da; padding: 8px 15px; border-radius: 4px; cursor: pointer; margin-top: 10px; font-size: 0.9rem; }
+.add-variant-btn:hover, .add-item-btn:hover { background-color: #dee2e6; }
+
+.form-actions { display: flex; justify-content: flex-end; margin-top: 30px; gap: 10px; }
+.form-actions button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+.cancel-button { background-color: #6c757d; color: white; }
+.save-button { background-color: #28a745; color: white; }
+.save-button:disabled { background-color: #aaa; cursor: not-allowed; }
+</style>
+Crea el Componente FormField.vue (Reutilizable):
+
+Archivo: src/components/FormField.vue (COMPLETO)
+
+Fragmento de código
+
+<template>
+  <div class="form-group">
+    <label v-if="label" :for="inputId">{{ label }} <span v-if="required" class="required">*</span></label>
+    <slot></slot> <small v-if="helpText" class="form-text text-muted">{{ helpText }}</small>
+    <div v-if="error" class="invalid-feedback">{{ error }}</div>
+  </div>
+</template>
+
+<script setup>
+import { computed } from 'vue';
+
+const props = defineProps({
+  label: String,
+  inputId: String, // Para el 'for' del label
+  required: Boolean,
+  helpText: String,
+  error: String // Mensaje de error específico del campo
+});
+
+// Generar un ID si no se proporciona
+const generatedId = computed(() => props.inputId || `field-${Math.random().toString(36).substr(2, 9)}`);
+</script>
+
+<style scoped>
+.form-group {
+  margin-bottom: 1rem; /* Espaciado estándar */
+}
+label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+   font-size: 0.9rem;
+   color: #495057;
+}
+.required {
+  color: #dc3545; /* Rojo */
+  margin-left: 2px;
+}
+.form-text {
+  font-size: 0.8rem;
+  color: #6c757d;
+  display: block;
+  margin-top: 0.25rem;
+}
+.invalid-feedback {
+  color: #dc3545;
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
+/* Estilos para los slots (inputs, selects) si es necesario */
+:slotted(input),
+:slotted(select),
+:slotted(textarea) {
+  /* Puedes añadir estilos por defecto aquí si quieres */
+  /* Por ejemplo: border-radius: 4px; */
+}
+</style>
+(Continuación en la siguiente respuesta debido al límite de caracteres)
+
+
+PS D:\Proyectos\Ventas\minimarket-frontend\src> tree
+Folder PATH listing for volume New Volume
+Volume serial number is CA5D-B928
+D:.
+├───assets
+├───components
+│   ├───admin
+│   │   └───products
+│   └───icons
+├───layouts
+├───router
+├───services
+├───stores
+└───views
+    └───admin
+        ├───brands
+        ├───categories
+        ├───prices
+        ├───products
+        ├───taxes
+        └───units
+PS D:\Proyectos\Ventas\minimarket-frontend\src>  arbol
